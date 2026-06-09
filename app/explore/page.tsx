@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { ProductImage } from "@/components/ProductImage";
 import { supabase } from "@/lib/supabaseClient";
 
 type Product = {
@@ -13,6 +14,7 @@ type Product = {
   image_url: string | null;
   description: string | null;
   product_verification_status: string | null;
+  enrichment_status: string | null;
   created_at: string;
 };
 
@@ -41,6 +43,7 @@ export default function ExplorePage() {
   const [searchText, setSearchText] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("All");
   const [verificationFilter, setVerificationFilter] = useState("All");
+  const [enrichmentFilter, setEnrichmentFilter] = useState("All");
   const [sortBy, setSortBy] = useState<SortOption>("newest");
 
   const [loading, setLoading] = useState(true);
@@ -54,7 +57,7 @@ export default function ExplorePage() {
       const { data: productsData, error: productsError } = await supabase
         .from("products")
         .select(
-          "id, slug, name, brand, category, image_url, description, product_verification_status, created_at"
+          "id, slug, name, brand, category, image_url, description, product_verification_status, enrichment_status, created_at"
         )
         .order("created_at", { ascending: false });
 
@@ -131,8 +134,20 @@ export default function ExplorePage() {
       const matchesVerification =
         verificationFilter === "All" ||
         product.product_verification_status === verificationFilter;
+      const matchesEnrichment =
+        enrichmentFilter === "All" ||
+        (enrichmentFilter === "enriched" &&
+          ["enriched", "snippet_enriched"].includes(
+            product.enrichment_status || ""
+          )) ||
+        product.enrichment_status === enrichmentFilter;
 
-      return matchesSearch && matchesCategory && matchesVerification;
+      return (
+        matchesSearch &&
+        matchesCategory &&
+        matchesVerification &&
+        matchesEnrichment
+      );
     });
 
     return [...matchesFilters].sort((firstProduct, secondProduct) => {
@@ -166,6 +181,7 @@ export default function ExplorePage() {
     searchText,
     categoryFilter,
     verificationFilter,
+    enrichmentFilter,
     sortBy,
     ownerCountsByProductId,
     questionCountsByProductId,
@@ -209,7 +225,7 @@ export default function ExplorePage() {
       </section>
 
       <section className="card mb-8 p-5">
-        <div className="grid gap-4 md:grid-cols-[1fr_180px_220px_180px]">
+        <div className="grid gap-4 md:grid-cols-[1fr_160px_200px_180px_160px]">
           <div>
             <label className="label">Search</label>
             <input
@@ -245,6 +261,20 @@ export default function ExplorePage() {
               <option value="user_submitted">User-submitted</option>
               <option value="needs_review">Needs review</option>
               <option value="rejected">Rejected</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="label">Enrichment</label>
+            <select
+              className="input mt-2"
+              value={enrichmentFilter}
+              onChange={(event) => setEnrichmentFilter(event.target.value)}
+            >
+              <option value="All">All</option>
+              <option value="not_enriched">Not enriched</option>
+              <option value="enriched">Enriched</option>
+              <option value="failed">Failed</option>
             </select>
           </div>
 
@@ -285,23 +315,17 @@ export default function ExplorePage() {
             const questionCount = getQuestionCount(product.id);
 
             return (
-              <Link
+              <div
                 key={product.id}
-                href={`/product/${product.slug}`}
-                className="card block overflow-hidden hover:-translate-y-1 hover:shadow-md"
+                className="card overflow-hidden hover:-translate-y-1 hover:shadow-md"
               >
                 <div className="h-48 bg-slate-100">
-                  {product.image_url ? (
-                    <img
-                      src={product.image_url}
-                      alt={product.name}
-                      className="h-full w-full object-cover"
-                    />
-                  ) : (
-                    <div className="flex h-full items-center justify-center text-muted">
-                      No image
-                    </div>
-                  )}
+                  <ProductImage
+                    src={product.image_url}
+                    category={product.category}
+                    alt={product.name}
+                    className="h-full w-full object-cover"
+                  />
                 </div>
 
                 <div className="p-5">
@@ -312,11 +336,6 @@ export default function ExplorePage() {
                   </div>
 
                   <h2 className="mt-2 text-xl font-black">{product.name}</h2>
-
-                  <p className="mt-3 line-clamp-2 text-sm leading-6 text-muted">
-                    {product.description ||
-                      "Ask real owners about this product before buying."}
-                  </p>
 
                   <div className="mt-4 flex flex-wrap gap-2">
                     <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
@@ -332,11 +351,30 @@ export default function ExplorePage() {
                     <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
                       {questionCount} questions
                     </span>
+
+                    {product.enrichment_status && (
+                      <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
+                        {product.enrichment_status.replace(/_/g, " ")}
+                      </span>
+                    )}
                   </div>
 
-                  <p className="mt-5 text-sm font-black">View product →</p>
+                  <div className="mt-5 flex flex-wrap gap-3">
+                    <Link
+                      href={`/product/${product.slug}`}
+                      className="btn btn-dark"
+                    >
+                      View product
+                    </Link>
+                    <Link
+                      href={`/product/${product.slug}#ask-question`}
+                      className="btn"
+                    >
+                      Ask owners
+                    </Link>
+                  </div>
                 </div>
-              </Link>
+              </div>
             );
           })}
         </section>

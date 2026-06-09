@@ -24,6 +24,9 @@ type RawOwnerVerification = {
   rating: number | null;
   review_text: string | null;
   verification_code: string | null;
+  verification_challenge: string | null;
+  verification_capture_method: string | null;
+  verification_token_expires_at: string | null;
   verification_photo_url: string | null;
   products: ProductInfo | ProductInfo[] | null;
   profiles: ProfileInfo | ProfileInfo[] | null;
@@ -35,6 +38,9 @@ type OwnerVerification = {
   rating: number | null;
   review_text: string | null;
   verification_code: string | null;
+  verification_challenge: string | null;
+  verification_capture_method: string | null;
+  verification_token_expires_at: string | null;
   verification_photo_url: string | null;
   products: ProductInfo | null;
   profiles: ProfileInfo | null;
@@ -53,6 +59,20 @@ function getOwnerName(profile: ProfileInfo | null) {
   if (profile.display_name) return profile.display_name;
   if (profile.email) return profile.email;
   return "Unknown owner";
+}
+
+function getCaptureMethodLabel(method?: string | null) {
+  if (method === "phone_camera") return "Phone camera";
+  if (method === "live_camera") return "Live camera";
+  if (method === "upload") return "Manual upload";
+  return "Not recorded";
+}
+
+function getCaptureMethodBadgeClass(method?: string | null) {
+  if (method === "phone_camera") return "bg-blue-100 text-blue-800";
+  if (method === "live_camera") return "bg-emerald-100 text-emerald-800";
+  if (method === "upload") return "bg-amber-100 text-amber-800";
+  return "bg-slate-100 text-slate-700";
 }
 
 export default function AdminOwnerVerificationsPage() {
@@ -91,7 +111,7 @@ export default function AdminOwnerVerificationsPage() {
     const { data, error } = await supabase
       .from("owned_products")
       .select(
-        "id, ownership_months, rating, review_text, verification_code, verification_photo_url, products(slug, name, brand, category), profiles(display_name, email)"
+        "id, ownership_months, rating, review_text, verification_code, verification_challenge, verification_capture_method, verification_token_expires_at, verification_photo_url, products(slug, name, brand, category), profiles(display_name, email)"
       )
       .eq("verification_status", "photo_submitted")
       .order("created_at", { ascending: false });
@@ -282,6 +302,16 @@ export default function AdminOwnerVerificationsPage() {
                       : ""}
                   </p>
 
+                  <span
+                    className={`mt-3 inline-flex rounded-full px-3 py-1 text-xs font-black ${getCaptureMethodBadgeClass(
+                      verification.verification_capture_method
+                    )}`}
+                  >
+                    {getCaptureMethodLabel(
+                      verification.verification_capture_method
+                    )}
+                  </span>
+
                   <div className="mt-4 grid gap-3 md:grid-cols-3">
                     <div className="rounded-2xl bg-slate-50 p-3">
                       <p className="text-xs font-black uppercase text-muted">
@@ -309,7 +339,44 @@ export default function AdminOwnerVerificationsPage() {
                         {verification.verification_code || "No code"}
                       </p>
                     </div>
+
+                    <div className="rounded-2xl bg-slate-50 p-3">
+                      <p className="text-xs font-black uppercase text-muted">
+                        Capture method
+                      </p>
+                      <p className="mt-1 text-sm font-black">
+                        {getCaptureMethodLabel(
+                          verification.verification_capture_method
+                        )}
+                      </p>
+                    </div>
+
+                    <div className="rounded-2xl bg-slate-50 p-3">
+                      <p className="text-xs font-black uppercase text-muted">
+                        Token status
+                      </p>
+                      <p className="mt-1 text-sm font-black">
+                        {verification.verification_token_expires_at
+                          ? new Date(
+                              verification.verification_token_expires_at
+                            ).getTime() > Date.now()
+                            ? "Active"
+                            : "Expired"
+                          : "No active token"}
+                      </p>
+                    </div>
                   </div>
+
+                  {verification.verification_challenge && (
+                    <div className="mt-4 rounded-2xl bg-slate-50 p-4">
+                      <p className="text-xs font-black uppercase text-muted">
+                        Verification challenge
+                      </p>
+                      <p className="mt-2 leading-7">
+                        {verification.verification_challenge}
+                      </p>
+                    </div>
+                  )}
 
                   {verification.review_text && (
                     <div className="mt-4 rounded-2xl bg-slate-50 p-4">

@@ -48,7 +48,31 @@ end $$;
 
 alter table public.owned_products
   add column if not exists verification_photo_url text,
-  add column if not exists verification_code text;
+  add column if not exists verification_code text,
+  add column if not exists verification_token text,
+  add column if not exists verification_token_expires_at timestamptz,
+  add column if not exists verification_challenge text,
+  add column if not exists verification_capture_method text;
+
+do $$
+begin
+  if exists (
+    select 1
+    from pg_constraint
+    where conname = 'owned_products_verification_capture_method_check'
+      and conrelid = 'public.owned_products'::regclass
+  ) then
+    alter table public.owned_products
+      drop constraint owned_products_verification_capture_method_check;
+  end if;
+
+  alter table public.owned_products
+    add constraint owned_products_verification_capture_method_check
+    check (
+      verification_capture_method is null
+      or verification_capture_method in ('upload', 'live_camera', 'phone_camera')
+    );
+end $$;
 
 do $$
 begin
@@ -127,6 +151,30 @@ create table if not exists public.answer_helpful_votes (
   unique(answer_id, user_id)
 );
 
+create table if not exists public.owner_product_ratings (
+  id uuid primary key default uuid_generate_v4(),
+  product_id uuid not null references public.products(id) on delete cascade,
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  owned_product_id uuid not null references public.owned_products(id) on delete cascade,
+  criteria_scores jsonb not null default '{}'::jsonb,
+  overall_rating numeric(2,1) check (overall_rating >= 1 and overall_rating <= 5),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'unique_owner_product_rating'
+      and conrelid = 'public.owner_product_ratings'::regclass
+  ) then
+    alter table public.owner_product_ratings
+      add constraint unique_owner_product_rating unique(user_id, product_id);
+  end if;
+end $$;
+
 create table if not exists public.direct_questions (
   id uuid primary key default gen_random_uuid(),
   product_id uuid references public.products(id) on delete cascade,
@@ -162,6 +210,7 @@ on conflict (id) do update set public = excluded.public;
 alter table public.profiles enable row level security;
 alter table public.products enable row level security;
 alter table public.owned_products enable row level security;
+alter table public.owner_product_ratings enable row level security;
 alter table public.questions enable row level security;
 alter table public.answers enable row level security;
 alter table public.direct_questions enable row level security;
@@ -171,6 +220,7 @@ alter table public.reports enable row level security;
 
 drop policy if exists "Products are public" on public.products;
 drop policy if exists "Owned products are public" on public.owned_products;
+drop policy if exists "Owner product ratings are public" on public.owner_product_ratings;
 drop policy if exists "Questions are public" on public.questions;
 drop policy if exists "Answers are public" on public.answers;
 drop policy if exists "Buyers can read own direct questions" on public.direct_questions;
@@ -187,6 +237,8 @@ drop policy if exists "Admin clients can update products" on public.products;
 drop policy if exists "Users can claim owned products" on public.owned_products;
 drop policy if exists "Users can update own owned products" on public.owned_products;
 drop policy if exists "Admin can review owner verifications" on public.owned_products;
+drop policy if exists "Owners can create own product ratings" on public.owner_product_ratings;
+drop policy if exists "Owners can update own product ratings" on public.owner_product_ratings;
 drop policy if exists "Users can ask questions" on public.questions;
 drop policy if exists "Users can update questions they asked" on public.questions;
 drop policy if exists "Authenticated users can mark questions answered" on public.questions;
@@ -199,9 +251,11 @@ drop policy if exists "Users can read own credit transactions" on public.credit_
 drop policy if exists "Users can create own credit transactions" on public.credit_transactions;
 drop policy if exists "Users can report content" on public.reports;
 drop policy if exists "Users can upload owner verification photos" on storage.objects;
+drop policy if exists "Anyone can upload phone verification photos" on storage.objects;
 
 create policy "Products are public" on public.products for select using (true);
 create policy "Owned products are public" on public.owned_products for select using (true);
+create policy "Owner product ratings are public" on public.owner_product_ratings for select using (true);
 create policy "Questions are public" on public.questions for select using (true);
 create policy "Answers are public" on public.answers for select using (true);
 create policy "Buyers can read own direct questions" on public.direct_questions for select using (auth.uid() = buyer_id);
@@ -220,6 +274,26 @@ create policy "Admin clients can update products" on public.products for update 
 create policy "Users can claim owned products" on public.owned_products for insert with check (auth.uid() = user_id);
 create policy "Users can update own owned products" on public.owned_products for update using (auth.uid() = user_id);
 create policy "Admin can review owner verifications" on public.owned_products for update using ((auth.jwt() ->> 'email') = 'reportkowalski1@gmail.com');
+create policy "Owners can create own product ratings" on public.owner_product_ratings for insert with check (
+  auth.uid() = user_id
+  and exists (
+    select 1
+    from public.owned_products
+    where owned_products.id = owner_product_ratings.owned_product_id
+      and owned_products.user_id = auth.uid()
+      and owned_products.product_id = owner_product_ratings.product_id
+  )
+);
+create policy "Owners can update own product ratings" on public.owner_product_ratings for update using (auth.uid() = user_id) with check (
+  auth.uid() = user_id
+  and exists (
+    select 1
+    from public.owned_products
+    where owned_products.id = owner_product_ratings.owned_product_id
+      and owned_products.user_id = auth.uid()
+      and owned_products.product_id = owner_product_ratings.product_id
+  )
+);
 
 create policy "Users can ask questions" on public.questions for insert with check (auth.uid() = buyer_id or buyer_id is null);
 create policy "Users can update questions they asked" on public.questions for update using (auth.uid() = buyer_id);
@@ -236,3 +310,38 @@ create policy "Users can upload owner verification photos" on storage.objects fo
   bucket_id = 'owner-verifications'
   and auth.uid()::text = (storage.foldername(name))[1]
 );
+
+create policy "Anyone can upload phone verification photos" on storage.objects for insert with check (
+  bucket_id = 'owner-verifications'
+  and (storage.foldername(name))[1] = 'phone-verifications'
+);
+
+create or replace function public.submit_owner_phone_verification(
+  owned_product_id_input uuid,
+  verification_token_input text,
+  photo_url_input text
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  update public.owned_products
+  set
+    verification_photo_url = photo_url_input,
+    verification_status = 'photo_submitted',
+    verification_capture_method = 'phone_camera',
+    verification_token = null,
+    verification_token_expires_at = null
+  where id = owned_product_id_input
+    and verification_token = verification_token_input
+    and verification_token_expires_at > now();
+
+  if not found then
+    raise exception 'This verification link expired. Please return to the product page and generate a new one.';
+  end if;
+end;
+$$;
+
+grant execute on function public.submit_owner_phone_verification(uuid, text, text) to anon, authenticated;

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { OwnerCriteriaRatingForm } from "@/components/OwnerCriteriaRatingForm";
 import { supabase } from "@/lib/supabaseClient";
 import {
   getOwnerLevel,
@@ -51,6 +52,12 @@ type OwnedProduct = {
   products: ProductInfo | null;
 };
 
+type OwnerProductRating = {
+  owned_product_id: string | null;
+  criteria_scores: Record<string, number> | null;
+  overall_rating: number | null;
+};
+
 function normalizeProduct(product: ProductInfo | ProductInfo[] | null) {
   if (Array.isArray(product)) {
     return product[0] || null;
@@ -64,6 +71,9 @@ export default function MyProductsPage() {
   const [loggedIn, setLoggedIn] = useState(false);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [ownedProducts, setOwnedProducts] = useState<OwnedProduct[]>([]);
+  const [ownerRatings, setOwnerRatings] = useState<
+    Record<string, OwnerProductRating>
+  >({});
   const [errorMessage, setErrorMessage] = useState("");
 
   useEffect(() => {
@@ -117,9 +127,25 @@ export default function MyProductsPage() {
           ...item,
           products: normalizeProduct(item.products),
         }));
+        const ownedProductIds = normalized.map((item) => item.id);
+        const { data: ratingData } =
+          ownedProductIds.length > 0
+            ? await supabase
+                .from("owner_product_ratings")
+                .select("owned_product_id, criteria_scores, overall_rating")
+                .in("owned_product_id", ownedProductIds)
+                .eq("user_id", user.id)
+            : { data: [] as OwnerProductRating[] };
 
         setProfile(profileData || null);
         setOwnedProducts(normalized);
+        setOwnerRatings(
+          Object.fromEntries(
+            ((ratingData || []) as OwnerProductRating[])
+              .filter((rating) => rating.owned_product_id)
+              .map((rating) => [rating.owned_product_id as string, rating])
+          )
+        );
       }
 
       setLoading(false);
@@ -190,10 +216,9 @@ export default function MyProductsPage() {
             );
 
             return (
-              <Link
+              <div
                 key={item.id}
-                href={`/product/${item.products?.slug || ""}`}
-                className="card block p-5 hover:-translate-y-1 hover:shadow-md"
+                className="card p-5"
               >
                 <div className="mb-4 overflow-hidden rounded-2xl bg-slate-100">
                   {item.products?.image_url ? (
@@ -248,8 +273,20 @@ export default function MyProductsPage() {
                   </p>
                 )}
 
-                <p className="mt-4 text-sm font-bold">View product →</p>
-              </Link>
+                <OwnerCriteriaRatingForm
+                  productId={item.product_id}
+                  ownedProductId={item.id}
+                  category={item.products?.category}
+                  initialScores={ownerRatings[item.id]?.criteria_scores}
+                />
+
+                <Link
+                  href={`/product/${item.products?.slug || ""}`}
+                  className="mt-4 inline-flex text-sm font-bold underline"
+                >
+                  View product →
+                </Link>
+              </div>
             );
           })}
         </div>

@@ -188,50 +188,44 @@ Shure SM7B,Shure,Microphones,https://images.unsplash.com/photo-1590602847861-f35
       return;
     }
 
-    const productsToInsert = parsed.map((product) => {
-      const brand = product.brand.trim();
-      const name = product.name.trim();
-      const category = product.category.trim() || "Other";
-      const imageUrl = product.image_url.trim();
-      const sourceUrl = product.source_url.trim();
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
 
-      const generated = generateProductData(name, brand, category);
+    if (!session?.access_token) {
+      setImporting(false);
+      setMessage("Admin session is missing. Log in again.");
+      return;
+    }
 
-      return {
-        slug: slugify(`${brand ? `${brand} ` : ""}${name}`),
-        name,
-        brand: brand || null,
-        category: category || null,
-        image_url: imageUrl || null,
-        description: generated.description,
-        ai_summary: generated.ai_summary,
-        starter_questions: generated.starter_questions,
-        evaluation_criteria: generated.evaluation_criteria,
-        search_keywords: generated.search_keywords,
-        data_source: "admin_import",
-        ai_generated: true,
-        product_verification_status: sourceUrl
-          ? "catalog_verified"
-          : "user_submitted",
-        source_url: sourceUrl || null,
-        verified_source: sourceUrl ? "admin_import_source_url" : null,
-        external_product_id: null,
-      };
+    const response = await fetch("/api/admin/import-products", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({ products: parsed }),
     });
-
-    const { error } = await supabase.from("products").upsert(productsToInsert, {
-      onConflict: "slug",
-    });
+    const result = (await response.json()) as {
+      error?: string;
+      rows?: Array<{ status: string }>;
+    };
 
     setImporting(false);
 
-    if (error) {
-      setMessage(error.message);
+    if (!response.ok) {
+      setMessage(result.error || "Could not import products.");
       return;
     }
 
     setPreviewProducts(parsed);
-    setMessage(`Imported ${productsToInsert.length} products.`);
+    const importedCount = (result.rows || []).filter(
+      (row) => row.status === "imported"
+    ).length;
+    const failedCount = (result.rows || []).filter(
+      (row) => row.status === "failed"
+    ).length;
+    setMessage(`Imported ${importedCount} products. Failed: ${failedCount}.`);
   }
 
   if (loading) {
@@ -290,6 +284,9 @@ Shure SM7B,Shure,Microphones,https://images.unsplash.com/photo-1590602847861-f35
         <div className="mt-5 flex flex-wrap gap-3">
           <Link href="/admin/products" className="btn">
             Review products
+          </Link>
+          <Link href="/admin/import-urls" className="btn">
+            Import URLs
           </Link>
           <Link href="/explore" className="btn">
             Explore catalog

@@ -1,5 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { findProductImage, isPlaceholderImage } from "@/lib/productImages";
+import {
+  buildCategoryDescription,
+  buildCategoryOverview,
+  extractCategorySpecs,
+  inferCategory as inferProfileCategory,
+  normalizeBrand as normalizeProfileBrand,
+} from "@/lib/productCategoryProfiles";
 
 const ADMIN_EMAIL = "reportkowalski1@gmail.com";
 
@@ -8,6 +16,7 @@ type Product = {
   name: string;
   brand: string | null;
   category: string | null;
+  image_url: string | null;
   source_url: string | null;
 };
 
@@ -15,6 +24,12 @@ type BraveSearchResult = {
   title?: string;
   description?: string;
   url?: string;
+  thumbnail?: {
+    src?: string;
+  };
+  profile?: {
+    img?: string;
+  };
 };
 
 type BraveSearchResponse = {
@@ -36,6 +51,12 @@ type SearchSource = {
   title: string;
   url: string;
   snippet: string;
+  thumbnail?: {
+    src?: string;
+  };
+  profile?: {
+    img?: string;
+  };
 };
 
 type EnrichmentLink = {
@@ -48,11 +69,22 @@ type ProductSpecs = {
   category: string | null;
   product_type: string | null;
   model: string | null;
-  connectivity: string | null;
-  battery_life: string | null;
+  connectivity?: string | null;
+  battery_life?: string | null;
+  sensor?: string | null;
+  video_resolution?: string | null;
+  stabilization?: string | null;
+  dynamic_range?: string | null;
+  color_profile?: string | null;
+  zoom?: string | null;
+  storage?: string | null;
+  noise_cancellation?: string | null;
+  microphone_type?: string | null;
+  polar_pattern?: string | null;
   main_features: string[];
   best_for: string[];
   check_before_buying: string[];
+  [key: string]: string | string[] | null | undefined;
 };
 
 type SignalRule = {
@@ -101,6 +133,45 @@ const FEATURE_RULES: SignalRule[] = [
   { keywords: ["audio interface", "interface"], label: "Audio interface" },
   { keywords: ["lighting", "light", "led"], label: "Lighting control" },
   { keywords: ["keyboard"], label: "Keyboard layout" },
+];
+
+const CAMERA_FEATURE_RULES: SignalRule[] = [
+  { keywords: ["1-inch cmos", "1 inch cmos", '1" cmos'], label: "1-inch CMOS sensor" },
+  { keywords: ["4k/240fps", "4k 240fps", "4k at 240fps"], label: "4K/240fps video" },
+  { keywords: ["4k"], label: "4K video" },
+  { keywords: ["10-bit", "10 bit"], label: "10-bit video" },
+  { keywords: ["d-log", "d log"], label: "D-Log color profile" },
+  { keywords: ["dynamic range"], label: "Wide dynamic range" },
+  { keywords: ["3-axis stabilization", "3 axis stabilization", "3-axis gimbal", "3 axis gimbal"], label: "3-axis stabilization" },
+  { keywords: ["activetrack", "active track"], label: "ActiveTrack subject tracking" },
+  { keywords: ["touchscreen", "touch screen"], label: "Touchscreen controls" },
+  { keywords: ["lossless zoom"], label: "Lossless zoom" },
+  { keywords: ["internal storage"], label: "Internal storage" },
+  { keywords: ["low-light", "low light"], label: "Low-light shooting" },
+  { keywords: ["creator combo"], label: "Creator Combo accessories" },
+];
+
+const HEADPHONE_FEATURE_RULES: SignalRule[] = [
+  { keywords: ["active noise cancellation", "noise cancelling", "noise canceling", "anc"], label: "Active noise cancellation" },
+  { keywords: ["transparency mode", "aware mode", "ambient mode"], label: "Transparency or aware mode" },
+  { keywords: ["bluetooth"], label: "Bluetooth" },
+  { keywords: ["wireless"], label: "Wireless" },
+  { keywords: ["over-ear", "over ear"], label: "Over-ear design" },
+  { keywords: ["in-ear", "in ear", "earbuds"], label: "In-ear design" },
+  { keywords: ["calls", "call quality"], label: "Calls" },
+  { keywords: ["comfort", "comfortable"], label: "Comfort-focused design" },
+  { keywords: ["travel"], label: "Travel use" },
+];
+
+const MICROPHONE_FEATURE_RULES: SignalRule[] = [
+  { keywords: ["dynamic microphone", "dynamic mic"], label: "Dynamic microphone" },
+  { keywords: ["condenser"], label: "Condenser microphone" },
+  { keywords: ["usb"], label: "USB connection" },
+  { keywords: ["xlr"], label: "XLR connection" },
+  { keywords: ["broadcast"], label: "Broadcast vocals" },
+  { keywords: ["podcast", "podcasting"], label: "Podcasting" },
+  { keywords: ["streaming"], label: "Streaming" },
+  { keywords: ["studio"], label: "Studio recording" },
 ];
 
 const BEST_FOR_RULES: SignalRule[] = [
@@ -176,6 +247,27 @@ function cleanProductText(product: Product, value: string) {
   return cleaned;
 }
 
+function normalizeBrand(value?: string | null) {
+  if (!value) {
+    return null;
+  }
+
+  const cleaned = cleanText(value);
+  const normalized = cleaned.toLowerCase();
+  const brandMap: Record<string, string> = {
+    dji: "DJI",
+    sony: "Sony",
+    bose: "Bose",
+    sennheiser: "Sennheiser",
+    apple: "Apple",
+    shure: "Shure",
+    rode: "Rode",
+    "røde": "Rode",
+  };
+
+  return brandMap[normalized] || cleaned;
+}
+
 function getProductLabel(product: Product) {
   const name = product.name.trim();
   const brand = product.brand?.trim();
@@ -219,7 +311,172 @@ function extractSignals(snippets: string[], rules: SignalRule[], limit: number) 
   return signals.slice(0, limit);
 }
 
-function extractConnectivity(snippets: string[]) {
+function includesAny(value: string, keywords: string[]) {
+  return keywords.some((keyword) => value.includes(keyword));
+}
+
+function hasMeaningfulCategory(category?: string | null) {
+  const normalized = category?.trim().toLowerCase();
+  return Boolean(normalized && normalized !== "other" && normalized !== "product");
+}
+
+function inferCategory({
+  name,
+  brand,
+  sourceUrl,
+  existingCategory,
+  snippets,
+}: {
+  name: string;
+  brand?: string | null;
+  sourceUrl?: string | null;
+  existingCategory?: string | null;
+  snippets: string[];
+}) {
+  if (hasMeaningfulCategory(existingCategory)) {
+    return cleanText(existingCategory as string);
+  }
+
+  const primaryHaystack = `${name} ${brand || ""} ${sourceUrl || ""}`.toLowerCase();
+  const snippetHaystack = snippets.join(" ").toLowerCase();
+  const haystacks = [primaryHaystack, snippetHaystack];
+
+  for (const haystack of haystacks) {
+    if (
+      includesAny(haystack, [
+        "osmo pocket",
+        "action camera",
+        "mirrorless",
+        "gimbal camera",
+        "pocket camera",
+        "creator combo",
+        "vlog camera",
+        "camera",
+      ])
+    ) {
+      return "Camera";
+    }
+
+    if (
+      includesAny(haystack, [
+        "headphones",
+        "headphone",
+        "headset",
+        "earbuds",
+        "airpods",
+        "quietcomfort",
+        "momentum wireless",
+        "wh-1000xm",
+        "dt 770",
+      ])
+    ) {
+      return "Headphones";
+    }
+
+    if (
+      includesAny(haystack, [
+        "microphone",
+        " mic ",
+        "/mic",
+        "-mic",
+        "sm7b",
+        "podmic",
+        "quadcast",
+        "yeti",
+        "nt1",
+        "mv7",
+      ])
+    ) {
+      return "Microphones";
+    }
+
+    if (
+      includesAny(haystack, [
+        "scarlett",
+        "volt",
+        "audient",
+        "audio interface",
+        " interface ",
+      ])
+    ) {
+      return "Audio Interface";
+    }
+
+    if (includesAny(haystack, ["key light", "amaran", "lighting", " led light"])) {
+      return "Lighting";
+    }
+
+    if (includesAny(haystack, ["keyboard", "mx keys", "magic keyboard"])) {
+      return "Keyboard";
+    }
+  }
+
+  return existingCategory?.trim() || "Other";
+}
+
+function inferProductType({
+  product,
+  category,
+  snippets,
+}: {
+  product: Product;
+  category: string | null;
+  snippets: string[];
+}) {
+  const haystack = `${product.name} ${product.brand || ""} ${product.source_url || ""} ${snippets.join(" ")}`.toLowerCase();
+  const normalizedCategory = category?.toLowerCase() || "";
+
+  if (normalizedCategory.includes("camera")) {
+    if (includesAny(haystack, ["osmo pocket", "pocket gimbal camera", "gimbal camera"])) {
+      return "Pocket gimbal camera";
+    }
+    if (includesAny(haystack, ["zv-e10", "eos r50", "mirrorless"])) {
+      return "Mirrorless camera";
+    }
+    if (includesAny(haystack, ["action camera"])) {
+      return "Action camera";
+    }
+    return "Camera";
+  }
+
+  if (normalizedCategory.includes("headphone")) {
+    if (includesAny(haystack, ["earbuds", "earbud", "in-ear", "in ear", "airpods pro"])) {
+      return "Wireless earbuds";
+    }
+    if (includesAny(haystack, ["over-ear", "over ear", "airpods max", "wh-1000xm", "quietcomfort", "momentum wireless"])) {
+      return "Wireless over-ear headphones";
+    }
+    return "Headphones";
+  }
+
+  if (normalizedCategory.includes("microphone")) {
+    if (includesAny(haystack, ["sm7b", "dynamic microphone", "dynamic mic"])) {
+      return "Dynamic broadcast microphone";
+    }
+    if (includesAny(haystack, ["nt1", "condenser"])) {
+      return "Condenser microphone";
+    }
+    return "Microphone";
+  }
+
+  if (normalizedCategory.includes("audio interface")) {
+    if (includesAny(haystack, ["usb", "scarlett", "volt", "audient"])) {
+      return "USB audio interface";
+    }
+    return "Audio Interface";
+  }
+
+  if (normalizedCategory.includes("lighting")) return "Lighting";
+  if (normalizedCategory.includes("keyboard")) return "Keyboard";
+
+  return category || null;
+}
+
+function extractConnectivity(snippets: string[], category?: string | null) {
+  if (category?.toLowerCase().includes("camera")) {
+    return null;
+  }
+
   const signals = extractSignals(
     snippets,
     [
@@ -257,26 +514,6 @@ function extractBatteryLife(snippets: string[]) {
   return null;
 }
 
-function extractProductType(product: Product, snippets: string[]) {
-  const haystack = `${product.category || ""} ${snippets.join(" ")}`.toLowerCase();
-  const typeRules: SignalRule[] = [
-    { keywords: ["headphones", "headphone"], label: "Headphones" },
-    { keywords: ["earbuds", "earbud"], label: "Earbuds" },
-    { keywords: ["microphone", "mic"], label: "Microphone" },
-    { keywords: ["audio interface", "interface"], label: "Audio Interface" },
-    { keywords: ["lighting", "light", "led"], label: "Lighting" },
-    { keywords: ["keyboard"], label: "Keyboard" },
-    { keywords: ["camera", "mirrorless"], label: "Camera" },
-    { keywords: ["laptop", "notebook"], label: "Laptop" },
-    { keywords: ["monitor", "display"], label: "Monitor" },
-    { keywords: ["speaker"], label: "Speaker" },
-  ];
-
-  return typeRules.find((rule) =>
-    rule.keywords.some((keyword) => haystack.includes(keyword))
-  )?.label || product.category || null;
-}
-
 function extractModel(product: Product, snippets: string[]) {
   const haystack = snippets.join(" ").toLowerCase();
   const name = product.name.trim();
@@ -288,8 +525,48 @@ function extractModel(product: Product, snippets: string[]) {
   return null;
 }
 
-function getCheckBeforeBuying(product: Product, productType: string | null) {
-  const haystack = `${product.category || ""} ${productType || ""}`.toLowerCase();
+function extractFirstMatch(snippets: string[], patterns: RegExp[]) {
+  const haystack = snippets.join(" ");
+
+  for (const pattern of patterns) {
+    const match = haystack.match(pattern);
+    if (match?.[1]) {
+      return cleanText(match[1]);
+    }
+    if (match?.[0]) {
+      return cleanText(match[0]);
+    }
+  }
+
+  return null;
+}
+
+function getCategoryFeatureRules(category?: string | null) {
+  const normalized = category?.toLowerCase() || "";
+  if (normalized.includes("camera")) return CAMERA_FEATURE_RULES;
+  if (normalized.includes("headphone")) return HEADPHONE_FEATURE_RULES;
+  if (normalized.includes("microphone")) return MICROPHONE_FEATURE_RULES;
+  return FEATURE_RULES;
+}
+
+function getBestFor(product: Product, category: string | null, snippets: string[]) {
+  const normalizedCategory = category?.toLowerCase() || "";
+  const detected = extractSignals(snippets, BEST_FOR_RULES, 6);
+
+  if (normalizedCategory.includes("camera")) {
+    return getTopFacts(detected, [
+      "Vlogging",
+      "Travel video",
+      "Solo content creation",
+      "Handheld filming",
+    ], 6);
+  }
+
+  return detected;
+}
+
+function getCheckBeforeBuying(product: Product, productType: string | null, category?: string | null) {
+  const haystack = `${category || product.category || ""} ${productType || ""}`.toLowerCase();
 
   if (haystack.includes("headphone") || haystack.includes("earbud")) {
     return [
@@ -314,11 +591,12 @@ function getCheckBeforeBuying(product: Product, productType: string | null) {
 
   if (haystack.includes("camera")) {
     return [
-      "Autofocus",
-      "Overheating",
       "Low-light performance",
-      "Lens ecosystem",
       "Battery life",
+      "Audio/mic setup",
+      "Overheating",
+      "Accessory compatibility",
+      "Stabilization quality",
     ];
   }
 
@@ -335,6 +613,71 @@ function getCheckBeforeBuying(product: Product, productType: string | null) {
   return ["Build quality", "Long-term reliability", "Compatibility", "Price/value"];
 }
 
+function buildCategoryAwareSpecs(product: Product, category: string, productType: string | null, snippets: string[]): ProductSpecs {
+  const normalizedCategory = category.toLowerCase();
+  const specs: ProductSpecs = {
+    brand: product.brand,
+    category,
+    product_type: productType,
+    model: extractModel(product, snippets),
+    connectivity: extractConnectivity(snippets, category),
+    battery_life: extractBatteryLife(snippets),
+    main_features: extractSignals(snippets, getCategoryFeatureRules(category), 8),
+    best_for: getBestFor(product, category, snippets),
+    check_before_buying: getCheckBeforeBuying(product, productType, category),
+  };
+
+  if (normalizedCategory.includes("camera")) {
+    specs.sensor = extractFirstMatch(snippets, [
+      /\b(1-inch CMOS sensor)\b/i,
+      /\b(1 inch CMOS sensor)\b/i,
+      /\b([0-9.]+-inch [^,.]{0,30}sensor)\b/i,
+    ]);
+    specs.video_resolution = extractFirstMatch(snippets, [
+      /\b(4K\/240fps)\b/i,
+      /\b(4K\s*(?:at)?\s*240fps)\b/i,
+      /\b(4K(?:\s+video|\s+recording)?)\b/i,
+    ]);
+    specs.stabilization = extractFirstMatch(snippets, [
+      /\b(3-axis stabilization)\b/i,
+      /\b(3 axis stabilization)\b/i,
+      /\b(3-axis gimbal)\b/i,
+    ]);
+    specs.dynamic_range = extractFirstMatch(snippets, [
+      /\b(\d+(?:\.\d+)?\s*stops?\s+of\s+dynamic\s+range)\b/i,
+      /\b(dynamic range)\b/i,
+    ]);
+    specs.color_profile = extractFirstMatch(snippets, [/\b(10-bit D-Log[^\s,.]*)\b/i, /\b(D-Log[^\s,.]*)\b/i]);
+    specs.zoom = extractFirstMatch(snippets, [/\b(lossless zoom)\b/i, /\b(\d+x\s+zoom)\b/i]);
+    specs.storage = extractFirstMatch(snippets, [/\b(internal storage)\b/i, /\b(\d+\s*GB\s+storage)\b/i]);
+    specs.connectivity = null;
+  }
+
+  if (normalizedCategory.includes("headphone")) {
+    specs.noise_cancellation = extractFirstMatch(snippets, [
+      /\b(active noise cancellation)\b/i,
+      /\b(noise cancell(?:ing|ation))\b/i,
+      /\b(ANC)\b/i,
+    ]);
+  }
+
+  if (normalizedCategory.includes("microphone")) {
+    specs.microphone_type = extractFirstMatch(snippets, [
+      /\b(dynamic microphone)\b/i,
+      /\b(condenser microphone)\b/i,
+      /\b(dynamic mic)\b/i,
+      /\b(condenser mic)\b/i,
+    ]);
+    specs.polar_pattern = extractFirstMatch(snippets, [
+      /\b(cardioid)\b/i,
+      /\b(supercardioid)\b/i,
+      /\b(omnidirectional)\b/i,
+    ]);
+  }
+
+  return specs;
+}
+
 function joinReadableList(items: string[]) {
   if (items.length <= 1) {
     return items[0] || "";
@@ -345,6 +688,10 @@ function joinReadableList(items: string[]) {
 
 function lowerFirst(value: string) {
   return value.charAt(0).toLowerCase() + value.slice(1);
+}
+
+function withArticle(value: string) {
+  return /^[aeiou]/i.test(value) ? `an ${value}` : `a ${value}`;
 }
 
 function getTopFacts(items: string[], fallbackItems: string[], limit: number) {
@@ -431,8 +778,14 @@ function buildDescription(product: Product, specs: ProductSpecs) {
 
   if (type.includes("camera")) {
     const useCaseText =
-      useCases.length > 0 ? joinReadableList(useCases.map(lowerFirst)) : "photo and video work";
-    return `${productLabel} is a camera aimed at ${useCaseText}. Key buying factors include ${joinReadableList(buyingFactors.map(lowerFirst))}.`;
+      useCases.length > 0
+        ? joinReadableList(useCases.map(lowerFirst))
+        : "vlogging, travel video and handheld content creation";
+    const detailText =
+      features.length > 0
+        ? ` Key details include ${joinReadableList(features.map(lowerFirst))}.`
+        : "";
+    return `${productLabel} is a compact stabilized camera designed for ${useCaseText}.${detailText}`;
   }
 
   if (type.includes("audio interface")) {
@@ -473,8 +826,10 @@ function buildAiSummary(product: Product, specs: ProductSpecs) {
   const sentences = [
     type
       ? `${productLabel} ${type.includes("headphone") || type.includes("earbud") ? "are" : "is"} ${
-          product.brand ? `${product.brand}'s ` : ""
-        }${type}.`
+          type.includes("headphone") || type.includes("earbud")
+            ? type
+            : withArticle(type)
+        }.`
       : `${productLabel} is listed on OwnerCheck for real-owner buying questions.`,
   ];
 
@@ -534,6 +889,8 @@ async function searchBrave(product: Product, apiKey: string) {
       title: cleanText(item.title as string),
       url: cleanText(item.url as string),
       snippet: cleanText(item.description || ""),
+      thumbnail: item.thumbnail,
+      profile: item.profile,
     }))
     .sort(sortSourcesByUsefulness);
 }
@@ -582,6 +939,13 @@ function buildSearchKeywords(product: Product, specs: ProductSpecs) {
   ).slice(0, 12);
 }
 
+function getSnippetTextForInference(sources: SearchSource[]) {
+  return sources
+    .flatMap((source) => [source.title, source.snippet])
+    .map(cleanText)
+    .filter(Boolean);
+}
+
 export async function POST(request: NextRequest) {
   try {
     const { productId } = (await request.json()) as { productId?: string };
@@ -608,7 +972,7 @@ export async function POST(request: NextRequest) {
 
     const { data: product, error: productError } = await supabase
       .from("products")
-      .select("id, name, brand, category, source_url")
+      .select("id, name, brand, category, image_url, source_url")
       .eq("id", productId)
       .single();
 
@@ -632,9 +996,7 @@ export async function POST(request: NextRequest) {
     const cleanProduct: Product = {
       ...originalProduct,
       name: cleanProductText(originalProduct, originalProduct.name),
-      brand: originalProduct.brand
-        ? cleanProductText(originalProduct, originalProduct.brand)
-        : null,
+      brand: normalizeProfileBrand(originalProduct.brand),
       category: originalProduct.category
         ? cleanProductText(originalProduct, originalProduct.category)
         : null,
@@ -644,35 +1006,66 @@ export async function POST(request: NextRequest) {
     const snippets = braveSources
       .map((source) => source.snippet)
       .filter((snippet) => snippet.length > 20);
-    const productType = extractProductType(cleanProduct, snippets);
-    const specs: ProductSpecs = {
+    const inferenceSnippets = getSnippetTextForInference(braveSources);
+    const correctedCategory = inferProfileCategory({
+      name: cleanProduct.name,
       brand: cleanProduct.brand,
-      category: cleanProduct.category,
-      product_type: productType,
-      model: extractModel(cleanProduct, snippets),
-      connectivity: extractConnectivity(snippets),
-      battery_life: extractBatteryLife(snippets),
-      main_features: extractSignals(snippets, FEATURE_RULES, 8),
-      best_for: extractSignals(snippets, BEST_FOR_RULES, 6),
-      check_before_buying: getCheckBeforeBuying(cleanProduct, productType),
+      sourceUrl: cleanProduct.source_url,
+      existingCategory: cleanProduct.category,
+      snippets: inferenceSnippets,
+    });
+    const enrichedProduct: Product = {
+      ...cleanProduct,
+      category: correctedCategory,
     };
+    const specs = extractCategorySpecs({
+      category: correctedCategory,
+      name: enrichedProduct.name,
+      brand: enrichedProduct.brand,
+      sourceUrl: enrichedProduct.source_url,
+      snippets,
+    });
+    const productType = specs.product_type;
     const fallbackSources = getFallbackSources(cleanProduct, braveSources);
     const externalSummarySources = uniqueLinks(fallbackSources);
     const externalReviewLinks = uniqueLinks(
       braveSources.filter(sourceMatchesReviewSignals)
     );
     const description = cleanProductText(
-      cleanProduct,
-      buildDescription(cleanProduct, specs)
+      enrichedProduct,
+      buildCategoryDescription({
+        name: enrichedProduct.name,
+        brand: enrichedProduct.brand,
+        category: correctedCategory,
+        productType,
+        specs,
+      })
     );
     const aiSummary = cleanProductText(
-      cleanProduct,
-      buildAiSummary(cleanProduct, specs)
+      enrichedProduct,
+      buildCategoryOverview({
+        name: enrichedProduct.name,
+        brand: enrichedProduct.brand,
+        category: correctedCategory,
+        productType,
+        specs,
+      })
     );
+    const imageUrl =
+      !enrichedProduct.image_url || isPlaceholderImage(enrichedProduct.image_url)
+        ? await findProductImage({
+            sourceUrl: enrichedProduct.source_url,
+            braveResults: braveSources,
+            category: correctedCategory,
+          })
+        : enrichedProduct.image_url;
 
     const { error: updateError } = await supabase
       .from("products")
       .update({
+        brand: enrichedProduct.brand,
+        category: correctedCategory,
+        image_url: imageUrl,
         description,
         ai_summary: aiSummary,
         specs,
@@ -680,9 +1073,9 @@ export async function POST(request: NextRequest) {
           "External source snippets were used to extract the product details and source links below.",
         common_praise: [],
         common_complaints: [],
-        starter_questions: buildStarterQuestions(cleanProduct, specs),
+        starter_questions: buildStarterQuestions(enrichedProduct, specs),
         evaluation_criteria: buildEvaluationCriteria(specs),
-        search_keywords: buildSearchKeywords(cleanProduct, specs),
+        search_keywords: buildSearchKeywords(enrichedProduct, specs),
         external_summary_sources: externalSummarySources,
         external_review_links: externalReviewLinks,
         external_summary_updated_at: new Date().toISOString(),

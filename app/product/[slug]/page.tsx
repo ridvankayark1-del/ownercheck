@@ -3,9 +3,12 @@ import { notFound } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { AskQuestionForm } from "@/components/AskQuestionForm";
 import { AnswerQuestionForm } from "@/components/AnswerQuestionForm";
-import { ClaimProductForm } from "@/components/ClaimProductForm";
+import { ClaimProductModal } from "@/components/ClaimProductModal";
 import { DirectQuestionForm } from "@/components/DirectQuestionForm";
 import { HelpfulButton } from "@/components/HelpfulButton";
+import { ProductImage } from "@/components/ProductImage";
+import { getCategoryProfile } from "@/lib/productCategoryProfiles";
+import { getOwnerEvaluationCriteria } from "@/lib/ownerEvaluationCriteria";
 import {
   getOwnerLevel,
   getOwnerLevelBadgeClass,
@@ -58,6 +61,15 @@ type OwnedProduct = {
   created_at: string;
 };
 
+type OwnerProductRating = {
+  id: string;
+  user_id: string | null;
+  owned_product_id: string | null;
+  criteria_scores: Record<string, number> | null;
+  overall_rating: number | null;
+  created_at: string;
+};
+
 type ExternalLink = {
   title: string;
   url: string;
@@ -70,6 +82,16 @@ type ProductSpecs = {
   model?: string | null;
   connectivity?: string | null;
   battery_life?: string | null;
+  sensor?: string | null;
+  video_resolution?: string | null;
+  stabilization?: string | null;
+  dynamic_range?: string | null;
+  color_profile?: string | null;
+  zoom?: string | null;
+  storage?: string | null;
+  noise_cancellation?: string | null;
+  microphone_type?: string | null;
+  polar_pattern?: string | null;
   main_features?: string[];
   best_for?: string[];
   check_before_buying?: string[];
@@ -117,22 +139,22 @@ function getProductSpecs(value: unknown): ProductSpecs | null {
 }
 
 function getSimpleSpecEntries(specs: ProductSpecs) {
+  const profile = getCategoryProfile(specs.category);
+  const profileKeys = new Set([
+    ...profile.specFields.map((field) => field.key),
+    "brand",
+    "category",
+    "product_type",
+    "model",
+    "main_features",
+    "best_for",
+    "check_before_buying",
+    "notable_features",
+    "use_cases",
+  ]);
+
   return Object.entries(specs).filter(([key, value]) => {
-    if (
-      [
-        "brand",
-        "category",
-        "product_type",
-        "model",
-        "connectivity",
-        "battery_life",
-        "main_features",
-        "best_for",
-        "check_before_buying",
-        "notable_features",
-        "use_cases",
-      ].includes(key)
-    ) {
+    if (profileKeys.has(key)) {
       return false;
     }
 
@@ -222,6 +244,14 @@ export default async function ProductPage({ params }: PageProps) {
     .eq("product_id", product.id)
     .order("created_at", { ascending: false });
 
+  const { data: ownerProductRatings } = await supabase
+    .from("owner_product_ratings")
+    .select(
+      "id, user_id, owned_product_id, criteria_scores, overall_rating, created_at"
+    )
+    .eq("product_id", product.id)
+    .order("created_at", { ascending: false });
+
   const questionIds = questions?.map((question) => question.id) || [];
 
   const { data: answers } =
@@ -271,17 +301,27 @@ export default async function ProductPage({ params }: PageProps) {
     product.external_summary_sources
   );
   const productSpecs = getProductSpecs(product.specs);
+  const categoryProfile = getCategoryProfile(
+    productSpecs?.category || product.category
+  );
   const simpleSpecEntries = productSpecs
     ? getSimpleSpecEntries(productSpecs)
     : [];
-  const snapshotItems = [
+  const baseSnapshotItems = [
     ["Brand", cleanOptionalSpec(productSpecs?.brand) || cleanDisplayText(product.brand || "")],
     ["Category", cleanOptionalSpec(productSpecs?.category) || cleanDisplayText(product.category || "")],
     ["Product type", cleanOptionalSpec(productSpecs?.product_type)],
     ["Model", cleanOptionalSpec(productSpecs?.model)],
-    ["Connectivity", cleanOptionalSpec(productSpecs?.connectivity)],
-    ["Battery life", cleanOptionalSpec(productSpecs?.battery_life)],
-  ].filter((item): item is [string, string] => Boolean(item[1]));
+  ];
+  const categorySnapshotItems = productSpecs
+    ? categoryProfile.specFields.map((field) => [
+        field.label,
+        cleanOptionalSpec(productSpecs[field.key] as string | null | undefined),
+      ])
+    : [];
+  const snapshotItems = [...baseSnapshotItems, ...categorySnapshotItems].filter(
+    (item): item is [string, string] => Boolean(item[1])
+  );
   const mainFeatures = getStringList(
     productSpecs?.main_features || productSpecs?.notable_features || []
   );
@@ -289,6 +329,14 @@ export default async function ProductPage({ params }: PageProps) {
   const checkBeforeBuying = getStringList(productSpecs?.check_before_buying);
   const overviewSentences = splitSentences(product.ai_summary);
   const externalSourceLinks = [
+    ...(product.source_url
+      ? [
+          {
+            title: "Submitted product source",
+            url: product.source_url,
+          },
+        ]
+      : []),
     ...externalReviewLinks,
     ...externalSummarySources.filter(
       (source) =>
@@ -298,10 +346,9 @@ export default async function ProductPage({ params }: PageProps) {
 
   const ownerCount = ownedProducts?.length || 0;
 
-  const photoSubmittedCount =
+  const photoVerifiedCount =
     ownedProducts?.filter(
       (ownedProduct: OwnedProduct) =>
-        ownedProduct.verification_status === "photo_submitted" ||
         ownedProduct.verification_status === "photo_verified"
     ).length || 0;
 
@@ -316,6 +363,59 @@ export default async function ProductPage({ params }: PageProps) {
           ratings.reduce((sum, rating) => sum + rating, 0) / ratings.length
         ).toFixed(1)
       : null;
+
+  const scorecardCriteria = getOwnerEvaluationCriteria(
+    productSpecs?.category || product.category
+  );
+  const scorecardRatings = ((ownerProductRatings || []) as OwnerProductRating[])
+    .filter((rating) => rating.criteria_scores && rating.overall_rating)
+    .map((rating) => {
+      const ownedProduct = (ownedProducts || []).find(
+        (item: OwnedProduct) =>
+          item.id === rating.owned_product_id || item.user_id === rating.user_id
+      );
+
+      return {
+        ...rating,
+        ownedProduct,
+      };
+    });
+  const scorecardRatingCount = scorecardRatings.length;
+  const scorecardOverall =
+    scorecardRatingCount > 0
+      ? scorecardRatings.reduce(
+          (sum, rating) => sum + (rating.overall_rating || 0),
+          0
+        ) / scorecardRatingCount
+      : null;
+  const scorecardAverages = scorecardCriteria
+    .map((criterion) => {
+      const values = scorecardRatings
+        .map((rating) => rating.criteria_scores?.[criterion])
+        .filter((score): score is number => typeof score === "number");
+
+      if (values.length === 0) {
+        return null;
+      }
+
+      return {
+        criterion,
+        average:
+          values.reduce((sum, score) => sum + score, 0) / values.length,
+      };
+    })
+    .filter(
+      (item): item is { criterion: string; average: number } => item !== null
+    );
+  const allScorecardsPhotoVerified =
+    scorecardRatingCount > 0 &&
+    scorecardRatings.every(
+      (rating) => rating.ownedProduct?.verification_status === "photo_verified"
+    );
+  const answeredQuestionCount =
+    questions?.filter((question: Question) =>
+      question.status === "answered" || getAnswersForQuestion(question.id).length > 0
+    ).length || 0;
 
   function getAnswersForQuestion(questionId: string) {
     return (answers || []).filter(
@@ -339,186 +439,429 @@ export default async function ProductPage({ params }: PageProps) {
   }
 
   return (
-    <main className="mx-auto max-w-6xl px-5 py-12">
+    <main className="mx-auto max-w-6xl px-4 pb-24 pt-6 md:px-5 md:pb-12">
       <Link href="/explore" className="text-sm font-bold text-muted">
         ← Back to explore
       </Link>
 
-      <section className="mt-6 grid gap-8 md:grid-cols-[360px_1fr]">
-        <div className="card p-5">
-          <div className="overflow-hidden rounded-3xl bg-slate-100">
-            {product.image_url ? (
-              <img
-                src={product.image_url}
-                alt={product.name}
-                className="h-72 w-full object-cover"
-              />
-            ) : (
-              <div className="flex h-72 items-center justify-center text-muted">
-                No image
+      <section className="card mt-4 overflow-hidden p-4 md:p-5">
+        <div className="grid gap-5 lg:grid-cols-[320px_1fr]">
+          <div className="overflow-hidden rounded-2xl bg-slate-100">
+            <ProductImage
+              src={product.image_url}
+              category={product.category}
+              alt={product.name}
+              className="h-60 w-full object-cover lg:h-full"
+            />
+          </div>
+
+          <div className="flex flex-col justify-between gap-5">
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-sm font-bold text-muted">
+                  {product.brand || "Unknown brand"} ·{" "}
+                  {product.category || "Uncategorized"}
+                  {productSpecs?.product_type ? ` · ${productSpecs.product_type}` : ""}
+                </p>
+                <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
+                  {getProductVerificationLabel(product.product_verification_status)}
+                </span>
               </div>
-            )}
-          </div>
 
-          <div className="mt-5 grid grid-cols-3 gap-3 text-center">
-            <div className="rounded-2xl bg-slate-50 p-4">
-              <p className="text-2xl font-black">{ownerCount}</p>
-              <p className="text-xs font-bold text-muted">Real owners</p>
-            </div>
+              <h1 className="mt-2 text-3xl font-black leading-tight md:text-5xl">
+                {product.name}
+              </h1>
 
-            <div className="rounded-2xl bg-slate-50 p-4">
-              <p className="text-2xl font-black">{photoSubmittedCount}</p>
-              <p className="text-xs font-bold text-muted">Photo proof</p>
-            </div>
-
-            <div className="rounded-2xl bg-slate-50 p-4">
-              <p className="text-2xl font-black">
-                {averageRating ? averageRating : "—"}
-              </p>
-              <p className="text-xs font-bold text-muted">Owner rating</p>
-            </div>
-          </div>
-
-          <div className="mt-5 flex flex-wrap gap-3">
-            <a href="#claim-product" className="btn btn-dark">
-              I own this
-            </a>
-
-            <a href="#ask-question" className="btn">
-              Ask question
-            </a>
-          </div>
-        </div>
-
-        <div>
-          <div className="flex flex-wrap items-center gap-2">
-            <p className="font-bold text-muted">
-              {product.brand || "Unknown brand"} ·{" "}
-              {product.category || "Uncategorized"}
-            </p>
-
-            <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
-              {getProductVerificationLabel(
-                product.product_verification_status
-              )}
-            </span>
-          </div>
-
-          <h1 className="mt-2 text-5xl font-black">{product.name}</h1>
-
-          <p className="mt-5 text-lg leading-8 text-muted">
-            {product.description
-              ? cleanDisplayText(product.description)
-              : "Ask real owners about this product before buying."}
-          </p>
-
-          {product.source_url && (
-            <a
-              href={product.source_url}
-              target="_blank"
-              rel="noreferrer"
-              className="mt-4 inline-flex text-sm font-bold underline"
-            >
-              View submitted product source
-            </a>
-          )}
-
-          {product.verified_source && (
-            <p className="mt-3 text-sm font-bold text-muted">
-              Verified source: {product.verified_source}
-            </p>
-          )}
-
-        </div>
-      </section>
-
-      <section className="mt-10 grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
-        <div className="card p-6">
-          <h2 className="text-2xl font-black">Real buyer questions</h2>
-
-          {!questions || questions.length === 0 ? (
-            <p className="mt-3 text-muted">
-              No one has asked about this product yet. Be the first to ask a
-              real owner.
-            </p>
-          ) : (
-            <div className="mt-5 space-y-5">
-              {questions.map((question: Question) => {
-                const questionAnswers = getAnswersForQuestion(question.id);
-                const buyerProfile = question.buyer_id
-                  ? profileMap.get(question.buyer_id)
-                  : undefined;
-
-                return (
-                  <div key={question.id} className="rounded-2xl border p-4">
-                    <p className="font-bold">{question.question_text}</p>
-                    <p className="mt-2 text-sm text-muted">
-                      Asked by {getProfileName(buyerProfile)} · Reward:{" "}
-                      {question.credit_reward} credits · {question.status}
-                    </p>
-
-                    {questionAnswers.length > 0 && (
-                      <div className="mt-4 space-y-3">
-                        <p className="text-sm font-black">Owner answers</p>
-
-                        {questionAnswers.map((answer: Answer) => {
-                          const answerProfile = answer.owner_id
-                            ? profileMap.get(answer.owner_id)
-                            : undefined;
-
-                          return (
-                            <div
-                              key={answer.id}
-                              className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-100"
-                            >
-                              <p className="leading-7">{answer.answer_text}</p>
-                              <p className="mt-2 text-xs font-bold text-muted">
-                                Answered by {getProfileName(answerProfile)}
-                              </p>
-                              <HelpfulButton
-                                answerId={answer.id}
-                                ownerId={answer.owner_id}
-                                currentHelpfulCount={answer.helpful_count}
-                              />
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-
-                    <AnswerQuestionForm questionId={question.id} />
+              <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                {[
+                  ["Owners", ownerCount > 0 ? ownerCount : "No owners yet"],
+                  [
+                    "Verified",
+                    photoVerifiedCount > 0
+                      ? photoVerifiedCount
+                      : "No verified owners yet",
+                  ],
+                  ["Rating", averageRating || "No rating yet"],
+                  ["Questions", questions?.length || 0],
+                ].map(([label, value]) => (
+                  <div key={label} className="rounded-2xl bg-slate-50 p-3">
+                    <p className="text-lg font-black">{value}</p>
+                    <p className="text-xs font-bold text-muted">{label}</p>
                   </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
+                ))}
+              </div>
 
-        <aside className="space-y-6">
-          <div id="ask-question">
-            <AskQuestionForm productId={product.id} />
-          </div>
-
-          <DirectQuestionForm productId={product.id} />
-
-          {product.ai_summary && (
-            <div className="card p-6">
-              <h2 className="text-2xl font-black">Product overview</h2>
-              <div className="mt-3 space-y-3 leading-7 text-muted">
-                {overviewSentences.map((sentence) => (
+              <div className="mt-4 space-y-2 leading-7 text-muted">
+                {(overviewSentences.length > 0
+                  ? overviewSentences.slice(0, 2)
+                  : [
+                      product.description
+                        ? cleanDisplayText(product.description)
+                        : "Ask real owners about this product before buying.",
+                    ]
+                ).map((sentence) => (
                   <p key={sentence}>{cleanDisplayText(sentence)}</p>
                 ))}
               </div>
             </div>
+
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <a href="#ask-question" className="btn btn-dark w-full sm:w-auto">
+                Ask owners a question
+              </a>
+              <ClaimProductModal
+                productId={product.id}
+                productSlug={product.slug}
+                category={product.category}
+                triggerClassName="btn w-full sm:w-auto"
+              />
+              {externalSourceLinks.length > 0 && (
+                <a href="#external-sources" className="btn w-full sm:w-auto">
+                  View sources
+                </a>
+              )}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="mt-5 grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
+        <div className="space-y-5">
+          <section className="card p-5">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <h2 className="text-2xl font-black">Owner scorecard</h2>
+                <p className="mt-1 text-sm font-black text-muted">
+                  Based on real-owner ratings.
+                </p>
+              </div>
+
+              <div className="text-right">
+                <p className="text-4xl font-black">
+                  {scorecardOverall ? scorecardOverall.toFixed(1) : "—"}
+                </p>
+                <p className="text-xs font-black text-muted">
+                  {scorecardRatingCount > 0
+                    ? `${scorecardRatingCount} owner ${
+                        scorecardRatingCount === 1 ? "rating" : "ratings"
+                      }`
+                    : "No ratings yet"}
+                </p>
+              </div>
+            </div>
+
+            {scorecardRatingCount > 0 ? (
+              <>
+                {allScorecardsPhotoVerified && (
+                  <span className="mt-3 inline-flex rounded-full bg-emerald-100 px-3 py-1 text-xs font-black text-emerald-800">
+                    Photo-verified owner ratings
+                  </span>
+                )}
+
+                <div className="mt-4 grid gap-3 md:grid-cols-2">
+                  {scorecardAverages.map((item) => (
+                    <div key={item.criterion} className="rounded-2xl bg-slate-50 p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="font-black">{item.criterion}</p>
+                        <p className="font-black">{item.average.toFixed(1)}</p>
+                      </div>
+                      <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200">
+                        <div
+                          className="h-full rounded-full bg-slate-900"
+                          style={{ width: `${Math.min(item.average * 20, 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <div className="mt-4 rounded-2xl bg-slate-50 p-4">
+                <p className="font-bold">Own this product? Add the first owner rating.</p>
+                <ClaimProductModal
+                  productId={product.id}
+                  productSlug={product.slug}
+                  category={product.category}
+                  triggerClassName="btn btn-dark mt-3"
+                  triggerLabel="Add owner rating"
+                />
+              </div>
+            )}
+          </section>
+
+          {checkBeforeBuying.length > 0 && (
+            <section className="card p-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-2xl font-black">Check before buying</h2>
+                  <p className="mt-1 text-sm font-bold text-muted">
+                    Use these as prompts when asking owners.
+                  </p>
+                </div>
+                <a href="#ask-question" className="btn">
+                  Ask owners about these
+                </a>
+              </div>
+              <ul className="mt-4 flex flex-wrap gap-2 text-sm font-bold">
+                {checkBeforeBuying.map((item) => (
+                  <li key={item}>
+                    <a
+                      href="#ask-question"
+                      className="inline-flex rounded-full bg-slate-100 px-3 py-2"
+                    >
+                      {item}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </section>
           )}
 
+          <section id="ask-question" className="card p-5">
+            <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
+              <div>
+                <h2 className="text-2xl font-black">Ask real owners</h2>
+                <p className="mt-2 leading-7 text-muted">
+                  Ask about comfort, battery life, durability, setup, long-term
+                  use, or anything reviews did not answer.
+                </p>
+              </div>
+
+              <div className="space-y-4 [&_.card]:bg-slate-50 [&_.card]:p-4 [&_h2]:text-xl">
+                <AskQuestionForm productId={product.id} />
+                <DirectQuestionForm productId={product.id} />
+              </div>
+            </div>
+          </section>
+
+          <section className="card p-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-2xl font-black">Questions for real owners</h2>
+                <p className="mt-1 text-sm font-bold text-muted">
+                  {answeredQuestionCount} answered · {questions?.length || 0} total
+                </p>
+              </div>
+              <a href="#ask-question" className="btn btn-dark">
+                Ask the first question
+              </a>
+            </div>
+
+            {!questions || questions.length === 0 ? (
+              <div className="mt-4 rounded-2xl bg-slate-50 p-4">
+                <p className="font-bold">No one has asked about this product yet.</p>
+                <a href="#ask-question" className="btn btn-dark mt-3">
+                  Ask the first question
+                </a>
+              </div>
+            ) : (
+              <div className="mt-5 space-y-4">
+                {questions.map((question: Question) => {
+                  const questionAnswers = getAnswersForQuestion(question.id);
+                  const buyerProfile = question.buyer_id
+                    ? profileMap.get(question.buyer_id)
+                    : undefined;
+
+                  return (
+                    <div key={question.id} className="rounded-2xl border p-4">
+                      <p className="font-black">{question.question_text}</p>
+                      <p className="mt-2 text-sm text-muted">
+                        Asked by {getProfileName(buyerProfile)} · Reward:{" "}
+                        {question.credit_reward} credits · {question.status}
+                      </p>
+
+                      {questionAnswers.length > 0 && (
+                        <div className="mt-4 space-y-3">
+                          {questionAnswers.map((answer: Answer) => {
+                            const answerProfile = answer.owner_id
+                              ? profileMap.get(answer.owner_id)
+                              : undefined;
+                            const answerOwnedProduct = (ownedProducts || []).find(
+                              (ownedProduct: OwnedProduct) =>
+                                ownedProduct.user_id === answer.owner_id
+                            );
+                            const answerOwnerLevel = getOwnerLevel(
+                              answerOwnedProduct?.verification_status,
+                              answerProfile?.trust_score
+                            );
+
+                            return (
+                              <div
+                                key={answer.id}
+                                className="rounded-2xl bg-slate-50 p-4"
+                              >
+                                <div className="flex flex-wrap items-center gap-2 text-xs font-black">
+                                  <span>
+                                    Answered by {getProfileName(answerProfile)}
+                                  </span>
+                                  <span
+                                    className={`rounded-full px-3 py-1 ${getOwnerLevelBadgeClass(
+                                      answerOwnerLevel
+                                    )}`}
+                                  >
+                                    {getOwnerLevelLabel(answerOwnerLevel)}
+                                  </span>
+                                </div>
+                                <p className="mt-3 leading-7">{answer.answer_text}</p>
+                                <HelpfulButton
+                                  answerId={answer.id}
+                                  ownerId={answer.owner_id}
+                                  currentHelpfulCount={answer.helpful_count}
+                                />
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      <div className="mt-4">
+                        <AnswerQuestionForm questionId={question.id} />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+
+          <section className="card p-5">
+            <h2 className="text-2xl font-black">Real-owner evaluations</h2>
+
+            {!ownedProducts || ownedProducts.length === 0 ? (
+              <p className="mt-3 text-muted">
+                No real owners have claimed this product yet. Be the first owner.
+              </p>
+            ) : (
+              <div className="mt-4 grid gap-4 md:grid-cols-2">
+                {ownedProducts.map((ownedProduct: OwnedProduct) => {
+                  const ownerProfile = ownedProduct.user_id
+                    ? profileMap.get(ownedProduct.user_id)
+                    : undefined;
+                  const ownerLevel = getOwnerLevel(
+                    ownedProduct.verification_status,
+                    ownerProfile?.trust_score
+                  );
+                  const helpfulActivity = getOwnerHelpfulActivity(
+                    ownedProduct.user_id
+                  );
+
+                  return (
+                    <div key={ownedProduct.id} className="rounded-2xl border p-4">
+                      <p className="text-sm font-bold text-muted">
+                        Owner review by {getProfileName(ownerProfile)}
+                      </p>
+
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <span
+                          className={`rounded-full px-3 py-1 text-xs font-black ${getOwnerLevelBadgeClass(
+                            ownerLevel
+                          )}`}
+                        >
+                          {getOwnerLevelLabel(ownerLevel)}
+                        </span>
+
+                        <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
+                          Trust {ownerProfile?.trust_score ?? 0}
+                        </span>
+
+                        <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
+                          {ownedProduct.ownership_months || 0} months owned
+                        </span>
+
+                        {ownedProduct.rating && (
+                          <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
+                            {ownedProduct.rating}/5 rating
+                          </span>
+                        )}
+
+                        {helpfulActivity.answerCount > 0 && (
+                          <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
+                            {helpfulActivity.answerCount} answers ·{" "}
+                            {helpfulActivity.helpfulCount} helpful
+                          </span>
+                        )}
+                      </div>
+
+                      {ownedProduct.review_text && (
+                        <p className="mt-3 leading-7">{ownedProduct.review_text}</p>
+                      )}
+
+                      <div className="mt-4 grid gap-3 md:grid-cols-2">
+                        {ownedProduct.pros && (
+                          <div className="rounded-2xl bg-slate-50 p-3">
+                            <p className="text-xs font-black uppercase text-muted">
+                              Pros
+                            </p>
+                            <p className="mt-1 text-sm">{ownedProduct.pros}</p>
+                          </div>
+                        )}
+
+                        {ownedProduct.cons && (
+                          <div className="rounded-2xl bg-slate-50 p-3">
+                            <p className="text-xs font-black uppercase text-muted">
+                              Cons
+                            </p>
+                            <p className="mt-1 text-sm">{ownedProduct.cons}</p>
+                          </div>
+                        )}
+                      </div>
+
+                      <p className="mt-4 text-sm font-bold text-muted">
+                        Would buy again:{" "}
+                        {ownedProduct.would_buy_again === true
+                          ? "Yes"
+                          : ownedProduct.would_buy_again === false
+                          ? "No"
+                          : "Not sure"}
+                      </p>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        </div>
+
+        <aside className="space-y-5 lg:sticky lg:top-4 lg:self-start">
+          <section className="card p-5">
+            <h2 className="text-xl font-black">Take action</h2>
+            <div className="mt-4 flex flex-col gap-3">
+              <a href="#ask-question" className="btn btn-dark w-full">
+                Ask owners a question
+              </a>
+              <ClaimProductModal
+                productId={product.id}
+                productSlug={product.slug}
+                category={product.category}
+                triggerClassName="btn w-full"
+              />
+              <Link href="/my-products" className="btn w-full">
+                My products
+              </Link>
+            </div>
+          </section>
+
+          <section className="card p-5">
+            <h2 className="text-xl font-black">Owner help matters</h2>
+            <p className="mt-2 text-sm leading-6 text-muted">
+              Owners help buyers by answering questions, sharing long-term
+              experience, and adding scorecards.
+            </p>
+            <ClaimProductModal
+              productId={product.id}
+              productSlug={product.slug}
+              category={product.category}
+              triggerClassName="btn btn-dark mt-4 w-full"
+            />
+          </section>
+
           {productSpecs && (
-            <div className="card p-6">
-              <h2 className="text-2xl font-black">Product details</h2>
+            <section className="card p-5">
+              <h2 className="text-xl font-black">Product details</h2>
               {snapshotItems.length > 0 && (
-                <div className="mt-5 grid gap-3">
+                <div className="mt-4 grid gap-2">
                   {snapshotItems.map(([label, value]) => (
-                    <div key={label} className="rounded-2xl bg-slate-50 p-4">
+                    <div key={label} className="rounded-2xl bg-slate-50 p-3">
                       <p className="text-xs font-black uppercase text-muted">
                         {label}
                       </p>
@@ -527,7 +870,7 @@ export default async function ProductPage({ params }: PageProps) {
                   ))}
 
                   {simpleSpecEntries.map(([key, value]) => (
-                    <div key={key} className="rounded-2xl bg-slate-50 p-4">
+                    <div key={key} className="rounded-2xl bg-slate-50 p-3">
                       <p className="text-xs font-black uppercase text-muted">
                         {formatSpecLabel(key)}
                       </p>
@@ -540,14 +883,11 @@ export default async function ProductPage({ params }: PageProps) {
               )}
 
               {mainFeatures.length > 0 && (
-                <div className="mt-5">
+                <div className="mt-4">
                   <h3 className="font-black">Main features</h3>
-                  <ul className="mt-3 flex flex-wrap gap-2 text-sm font-bold">
+                  <ul className="mt-2 flex flex-wrap gap-2 text-xs font-bold">
                     {mainFeatures.map((item) => (
-                      <li
-                        key={item}
-                        className="rounded-full bg-slate-100 px-3 py-1"
-                      >
+                      <li key={item} className="rounded-full bg-slate-100 px-3 py-1">
                         {item}
                       </li>
                     ))}
@@ -556,217 +896,73 @@ export default async function ProductPage({ params }: PageProps) {
               )}
 
               {bestFor.length > 0 && (
-                <div className="mt-5">
+                <div className="mt-4">
                   <h3 className="font-black">Best for</h3>
-                  <ul className="mt-3 flex flex-wrap gap-2 text-sm font-bold">
+                  <ul className="mt-2 flex flex-wrap gap-2 text-xs font-bold">
                     {bestFor.map((item) => (
-                      <li
-                        key={item}
-                        className="rounded-full bg-slate-100 px-3 py-1"
-                      >
+                      <li key={item} className="rounded-full bg-slate-100 px-3 py-1">
                         {item}
                       </li>
                     ))}
                   </ul>
                 </div>
               )}
-
-              {checkBeforeBuying.length > 0 && (
-                <div className="mt-5">
-                  <h3 className="font-black">Check before buying</h3>
-                  <ul className="mt-3 space-y-2 text-sm text-muted">
-                    {checkBeforeBuying.map((item) => (
-                      <li key={item}>- {item}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
+            </section>
           )}
 
-          {externalSourceLinks.length > 0 && (
-            <details className="card p-6">
-              <summary className="cursor-pointer text-2xl font-black">
-                External sources
-              </summary>
-              <p className="mt-2 text-sm font-black text-muted">
-                External source links are used for product facts and discovery.
-                OwnerCheck real-owner answers are separate.
-              </p>
-
-              <div className="mt-4 flex flex-wrap gap-3 text-sm font-bold">
-                {externalSourceLinks.map((link) => (
-                  <a
-                    key={link.url}
-                    href={link.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="underline"
-                  >
-                    {link.title}
-                  </a>
+          {starterQuestions.length > 0 && (
+            <section className="card p-5">
+              <h2 className="text-xl font-black">Question ideas</h2>
+              <ul className="mt-3 space-y-2 text-sm">
+                {starterQuestions.slice(0, 5).map((question: string, index: number) => (
+                  <li key={index} className="rounded-2xl bg-slate-50 p-3">
+                    {question}
+                  </li>
                 ))}
-              </div>
-            </details>
+              </ul>
+            </section>
           )}
-
-          <div id="claim-product">
-            <ClaimProductForm productId={product.id} />
-          </div>
         </aside>
       </section>
 
-      <section className="mt-10 grid gap-6 md:grid-cols-2">
-        <div className="card p-6">
-          <h2 className="text-2xl font-black">Common buyer questions</h2>
-
-          {starterQuestions.length === 0 ? (
-            <p className="mt-3 text-muted">No starter questions yet.</p>
-          ) : (
-            <ul className="mt-4 space-y-3">
-              {starterQuestions.map((question: string, index: number) => (
-                <li key={index} className="rounded-2xl bg-slate-50 p-4">
-                  {question}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-
-        <div className="card p-6">
-          <h2 className="text-2xl font-black">Evaluation criteria</h2>
-
-          {evaluationCriteria.length === 0 ? (
-            <p className="mt-3 text-muted">No criteria yet.</p>
-          ) : (
-            <ul className="mt-4 flex flex-wrap gap-3">
-              {evaluationCriteria.map((item: string, index: number) => (
-                <li
-                  key={index}
-                  className="rounded-full bg-slate-100 px-4 py-2 text-sm font-bold"
-                >
-                  {item}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      </section>
-
-      <section className="card mt-10 p-6">
-        <h2 className="text-2xl font-black">Real-owner evaluations</h2>
-
-        {!ownedProducts || ownedProducts.length === 0 ? (
-          <p className="mt-3 text-muted">
-            No real owners have claimed this product yet. Be the first owner.
+      {externalSourceLinks.length > 0 && (
+        <section id="external-sources" className="card mt-5 p-5">
+          <h2 className="text-2xl font-black">External sources</h2>
+          <p className="mt-2 text-sm font-black text-muted">
+            Used for product facts and source discovery. OwnerCheck real-owner
+            answers are separate.
           </p>
-        ) : (
-          <div className="mt-5 grid gap-4 md:grid-cols-2">
-            {ownedProducts.map((ownedProduct: OwnedProduct) => {
-              const ownerProfile = ownedProduct.user_id
-                ? profileMap.get(ownedProduct.user_id)
-                : undefined;
-              const ownerLevel = getOwnerLevel(
-                ownedProduct.verification_status,
-                ownerProfile?.trust_score
-              );
-              const helpfulActivity = getOwnerHelpfulActivity(
-                ownedProduct.user_id
-              );
 
-              return (
-                <div key={ownedProduct.id} className="rounded-2xl border p-4">
-                  <div className="flex flex-wrap items-center gap-2 text-sm font-bold text-muted">
-                    <span>Owner review by {getProfileName(ownerProfile)}</span>
-                  </div>
-
-                  <div className="mt-3 flex flex-wrap items-center gap-2">
-                    <span
-                      className={`rounded-full px-3 py-1 text-xs font-black ${getOwnerLevelBadgeClass(
-                        ownerLevel
-                      )}`}
-                    >
-                      {getOwnerLevelLabel(ownerLevel)}
-                    </span>
-
-                    <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
-                      Trust {ownerProfile?.trust_score ?? 0}
-                    </span>
-
-                    <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
-                      {ownedProduct.ownership_months || 0} months owned
-                    </span>
-
-                    {ownedProduct.rating && (
-                      <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
-                        {ownedProduct.rating}/5 rating
-                      </span>
-                    )}
-
-                    {helpfulActivity.answerCount > 0 && (
-                      <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
-                        {helpfulActivity.answerCount} answers ·{" "}
-                        {helpfulActivity.helpfulCount} helpful
-                      </span>
-                    )}
-
-                    {ownedProduct.verification_photo_url && (
-                      <a
-                        href={ownedProduct.verification_photo_url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-xs font-black underline"
-                      >
-                        View verification photo
-                      </a>
-                    )}
-
-                    {!ownedProduct.verification_photo_url && (
-                      <span className="text-xs font-bold text-muted">
-                        No photo proof
-                      </span>
-                    )}
-                  </div>
-
-                  {ownedProduct.review_text && (
-                    <p className="mt-3 leading-7">{ownedProduct.review_text}</p>
-                  )}
-
-                  <div className="mt-4 grid gap-3 md:grid-cols-2">
-                    {ownedProduct.pros && (
-                      <div className="rounded-2xl bg-slate-50 p-3">
-                        <p className="text-xs font-black uppercase text-muted">
-                          Pros
-                        </p>
-                        <p className="mt-1 text-sm">{ownedProduct.pros}</p>
-                      </div>
-                    )}
-
-                    {ownedProduct.cons && (
-                      <div className="rounded-2xl bg-slate-50 p-3">
-                        <p className="text-xs font-black uppercase text-muted">
-                          Cons
-                        </p>
-                        <p className="mt-1 text-sm">{ownedProduct.cons}</p>
-                      </div>
-                    )}
-                  </div>
-
-                  <p className="mt-4 text-sm font-bold text-muted">
-                    Would buy again:{" "}
-                    {ownedProduct.would_buy_again === true
-                      ? "Yes"
-                      : ownedProduct.would_buy_again === false
-                      ? "No"
-                      : "Not sure"}
-                  </p>
-                </div>
-              );
-            })}
+          <div className="mt-4 flex flex-wrap gap-3 text-sm font-bold">
+            {externalSourceLinks.map((link) => (
+              <a
+                key={link.url}
+                href={link.url}
+                target="_blank"
+                rel="noreferrer"
+                className="underline"
+              >
+                {link.title}
+              </a>
+            ))}
           </div>
-        )}
-      </section>
+        </section>
+      )}
 
+      <div className="fixed inset-x-0 bottom-0 z-30 border-t bg-white/95 p-3 shadow-lg backdrop-blur md:hidden">
+        <div className="mx-auto grid max-w-6xl grid-cols-2 gap-3">
+          <a href="#ask-question" className="btn btn-dark justify-center">
+            Ask owners
+          </a>
+          <ClaimProductModal
+            productId={product.id}
+            productSlug={product.slug}
+            category={product.category}
+            triggerClassName="btn justify-center"
+            triggerLabel="I own this"
+          />
+        </div>
+      </div>
     </main>
   );
 }

@@ -55,8 +55,24 @@ create table if not exists public.owned_products (
   would_buy_again boolean,
   verification_photo_url text,
   verification_code text,
+  verification_token text,
+  verification_token_expires_at timestamptz,
+  verification_challenge text,
+  verification_capture_method text check (verification_capture_method in ('upload', 'live_camera', 'phone_camera')),
   created_at timestamptz not null default now(),
   constraint unique_user_product_claim unique(user_id, product_id)
+);
+
+create table if not exists public.owner_product_ratings (
+  id uuid primary key default uuid_generate_v4(),
+  product_id uuid not null references public.products(id) on delete cascade,
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  owned_product_id uuid not null references public.owned_products(id) on delete cascade,
+  criteria_scores jsonb not null default '{}'::jsonb,
+  overall_rating numeric(2,1) check (overall_rating >= 1 and overall_rating <= 5),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint unique_owner_product_rating unique(user_id, product_id)
 );
 
 create table if not exists public.questions (
@@ -131,6 +147,7 @@ on conflict (id) do nothing;
 alter table public.profiles enable row level security;
 alter table public.products enable row level security;
 alter table public.owned_products enable row level security;
+alter table public.owner_product_ratings enable row level security;
 alter table public.questions enable row level security;
 alter table public.answers enable row level security;
 alter table public.direct_questions enable row level security;
@@ -140,6 +157,7 @@ alter table public.reports enable row level security;
 
 create policy "Products are public" on public.products for select using (true);
 create policy "Owned products are public" on public.owned_products for select using (true);
+create policy "Owner product ratings are public" on public.owner_product_ratings for select using (true);
 create policy "Questions are public" on public.questions for select using (true);
 create policy "Answers are public" on public.answers for select using (true);
 create policy "Buyers can read own direct questions" on public.direct_questions for select using (auth.uid() = buyer_id);
@@ -158,6 +176,26 @@ create policy "Admin clients can update products" on public.products for update 
 create policy "Users can claim owned products" on public.owned_products for insert with check (auth.uid() = user_id);
 create policy "Users can update own owned products" on public.owned_products for update using (auth.uid() = user_id);
 create policy "Admin can review owner verifications" on public.owned_products for update using ((auth.jwt() ->> 'email') = 'reportkowalski1@gmail.com');
+create policy "Owners can create own product ratings" on public.owner_product_ratings for insert with check (
+  auth.uid() = user_id
+  and exists (
+    select 1
+    from public.owned_products
+    where owned_products.id = owner_product_ratings.owned_product_id
+      and owned_products.user_id = auth.uid()
+      and owned_products.product_id = owner_product_ratings.product_id
+  )
+);
+create policy "Owners can update own product ratings" on public.owner_product_ratings for update using (auth.uid() = user_id) with check (
+  auth.uid() = user_id
+  and exists (
+    select 1
+    from public.owned_products
+    where owned_products.id = owner_product_ratings.owned_product_id
+      and owned_products.user_id = auth.uid()
+      and owned_products.product_id = owner_product_ratings.product_id
+  )
+);
 
 create policy "Users can ask questions" on public.questions for insert with check (auth.uid() = buyer_id or buyer_id is null);
 create policy "Users can update questions they asked" on public.questions for update using (auth.uid() = buyer_id);
@@ -174,3 +212,38 @@ create policy "Users can upload owner verification photos" on storage.objects fo
   bucket_id = 'owner-verifications'
   and auth.uid()::text = (storage.foldername(name))[1]
 );
+
+create policy "Anyone can upload phone verification photos" on storage.objects for insert with check (
+  bucket_id = 'owner-verifications'
+  and (storage.foldername(name))[1] = 'phone-verifications'
+);
+
+create or replace function public.submit_owner_phone_verification(
+  owned_product_id_input uuid,
+  verification_token_input text,
+  photo_url_input text
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  update public.owned_products
+  set
+    verification_photo_url = photo_url_input,
+    verification_status = 'photo_submitted',
+    verification_capture_method = 'phone_camera',
+    verification_token = null,
+    verification_token_expires_at = null
+  where id = owned_product_id_input
+    and verification_token = verification_token_input
+    and verification_token_expires_at > now();
+
+  if not found then
+    raise exception 'This verification link expired. Please return to the product page and generate a new one.';
+  end if;
+end;
+$$;
+
+grant execute on function public.submit_owner_phone_verification(uuid, text, text) to anon, authenticated;

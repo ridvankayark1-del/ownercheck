@@ -1,19 +1,28 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import {
+  getAverageScore,
+  getOwnerEvaluationCriteria,
+} from "@/lib/ownerEvaluationCriteria";
 import { supabase } from "@/lib/supabaseClient";
 
 type ClaimProductFormProps = {
   productId: string;
+  category?: string | null;
 };
 
 function createVerificationCode() {
   return `OwnerCheck-${Math.floor(1000 + Math.random() * 9000)}`;
 }
 
-export function ClaimProductForm({ productId }: ClaimProductFormProps) {
+export function ClaimProductForm({ productId, category }: ClaimProductFormProps) {
   const [verificationCode, setVerificationCode] = useState("");
 
+  const criteria = getOwnerEvaluationCriteria(category);
+  const [criteriaScores, setCriteriaScores] = useState<Record<string, string>>(
+    () => Object.fromEntries(criteria.map((criterion) => [criterion, "5"]))
+  );
   const [ownershipMonths, setOwnershipMonths] = useState("6");
   const [rating, setRating] = useState("5");
   const [reviewText, setReviewText] = useState("");
@@ -122,6 +131,30 @@ export function ClaimProductForm({ productId }: ClaimProductFormProps) {
 
       setMessage(error?.message || "Could not claim product.");
       return;
+    }
+
+    const numericCriteriaScores = Object.fromEntries(
+      criteria.map((criterion) => [
+        criterion,
+        Number(criteriaScores[criterion] || 0),
+      ])
+    );
+    const overallCriteriaRating = getAverageScore(numericCriteriaScores);
+
+    if (overallCriteriaRating) {
+      await supabase.from("owner_product_ratings").upsert(
+        {
+          product_id: productId,
+          user_id: user.id,
+          owned_product_id: ownedProduct.id,
+          criteria_scores: numericCriteriaScores,
+          overall_rating: Number(overallCriteriaRating.toFixed(1)),
+          updated_at: new Date().toISOString(),
+        },
+        {
+          onConflict: "user_id,product_id",
+        }
+      );
     }
 
     const { data: profile } = await supabase
@@ -267,6 +300,40 @@ export function ClaimProductForm({ productId }: ClaimProductFormProps) {
           <option value="true">Yes</option>
           <option value="false">No</option>
         </select>
+      </div>
+
+      <div className="mt-5 rounded-2xl bg-slate-50 p-4">
+        <h3 className="font-black">Owner scorecard</h3>
+        <p className="mt-1 text-sm font-bold text-muted">
+          Rate the parts buyers usually ask real owners about.
+        </p>
+
+        <div className="mt-4 grid gap-3">
+          {criteria.map((criterion) => (
+            <label
+              key={criterion}
+              className="grid gap-2 text-sm font-bold md:grid-cols-[1fr_96px]"
+            >
+              <span>{criterion}</span>
+              <select
+                className="input py-2"
+                value={criteriaScores[criterion] || "5"}
+                onChange={(event) =>
+                  setCriteriaScores((current) => ({
+                    ...current,
+                    [criterion]: event.target.value,
+                  }))
+                }
+              >
+                <option value="5">5</option>
+                <option value="4">4</option>
+                <option value="3">3</option>
+                <option value="2">2</option>
+                <option value="1">1</option>
+              </select>
+            </label>
+          ))}
+        </div>
       </div>
 
       <button

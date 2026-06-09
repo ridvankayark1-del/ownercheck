@@ -12,9 +12,8 @@ export default function HomePage() {
           </h1>
 
           <p className="mt-6 max-w-2xl text-lg leading-8 text-muted">
-            OwnerCheck helps buyers ask questions to people who already own the
-            product. No fake hype. No random reviews. Just real experience from
-            real owners.
+            Get answers from people who actually own the product — not generic
+            reviews or fake hype.
           </p>
 
           <div className="mt-8 flex flex-wrap gap-3">
@@ -119,6 +118,45 @@ export default function HomePage() {
       </section>
 
       <section className="mx-auto max-w-6xl px-5 py-16">
+        <div className="mb-8 max-w-2xl">
+          <p className="font-bold text-muted">Why OwnerCheck is different</p>
+          <h2 className="mt-2 text-4xl font-black">
+            No fake hype. No generic reviews.
+          </h2>
+          <p className="mt-4 leading-8 text-muted">
+            Reviews are often too generic. Star ratings do not answer your exact
+            question. OwnerCheck lets you ask people who actually own the
+            product.
+          </p>
+        </div>
+
+        <div className="grid gap-5 md:grid-cols-3">
+          <div className="card p-6">
+            <h3 className="text-xl font-black">Ask your question</h3>
+            <p className="mt-3 leading-7 text-muted">
+              Comfort, durability, setup, battery life, fit, noise, or
+              long-term issues.
+            </p>
+          </div>
+
+          <div className="card p-6">
+            <h3 className="text-xl font-black">Hear from owners</h3>
+            <p className="mt-3 leading-7 text-muted">
+              Product pages prioritize real-owner answers over broad review
+              summaries.
+            </p>
+          </div>
+
+          <div className="card p-6">
+            <h3 className="text-xl font-black">Buy with context</h3>
+            <p className="mt-3 leading-7 text-muted">
+              No fake hype. No generic reviews. Just answers from real owners.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section className="mx-auto max-w-6xl px-5 pb-16">
         <div className="card p-8 text-center">
           <h2 className="text-4xl font-black">
             Stop guessing from star ratings.
