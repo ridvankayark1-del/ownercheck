@@ -10,8 +10,24 @@ export function Header() {
   const [loggedIn, setLoggedIn] = useState(false);
   const [ready, setReady] = useState(false);
   const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [pendingDirectRequestCount, setPendingDirectRequestCount] = useState(0);
 
   useEffect(() => {
+    async function loadPendingDirectRequestCount(userId: string) {
+      const { count, error } = await supabase
+        .from("direct_questions")
+        .select("id", { count: "exact", head: true })
+        .eq("owner_id", userId)
+        .eq("status", "pending");
+
+      if (error) {
+        setPendingDirectRequestCount(0);
+        return;
+      }
+
+      setPendingDirectRequestCount(count || 0);
+    }
+
     async function checkUser() {
       const {
         data: { user },
@@ -19,6 +35,11 @@ export function Header() {
 
       setLoggedIn(!!user);
       setUserEmail(user?.email || null);
+      if (user) {
+        await loadPendingDirectRequestCount(user.id);
+      } else {
+        setPendingDirectRequestCount(0);
+      }
       setReady(true);
     }
 
@@ -29,6 +50,11 @@ export function Header() {
     } = supabase.auth.onAuthStateChange((_event, session) => {
       setLoggedIn(!!session?.user);
       setUserEmail(session?.user?.email || null);
+      if (session?.user) {
+        loadPendingDirectRequestCount(session.user.id);
+      } else {
+        setPendingDirectRequestCount(0);
+      }
       setReady(true);
     });
 
@@ -57,6 +83,12 @@ export function Header() {
           {ready && loggedIn && (
             <>
               <Link href="/my-products">My products</Link>
+              <Link href="/direct-requests">
+                Direct requests
+                {pendingDirectRequestCount > 0
+                  ? ` (${pendingDirectRequestCount})`
+                  : ""}
+              </Link>
               <Link href="/profile">Profile</Link>
 
               {userEmail === ADMIN_EMAIL && (

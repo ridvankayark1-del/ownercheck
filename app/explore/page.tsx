@@ -1,3 +1,6 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabaseClient";
 
@@ -9,23 +12,178 @@ type Product = {
   category: string | null;
   image_url: string | null;
   description: string | null;
+  product_verification_status: string | null;
+  created_at: string;
 };
 
-export default async function ExplorePage() {
-  const { data: products, error } = await supabase
-    .from("products")
-    .select("id, slug, name, brand, category, image_url, description")
-    .order("created_at", { ascending: false });
+type OwnedProduct = {
+  product_id: string;
+};
 
-  if (error) {
+type Question = {
+  product_id: string;
+};
+
+type SortOption = "newest" | "az" | "most_owners" | "most_questions";
+
+function getProductVerificationLabel(status?: string | null) {
+  if (status === "catalog_verified") return "Catalog verified";
+  if (status === "needs_review") return "Needs review";
+  if (status === "rejected") return "Rejected";
+  return "User-submitted";
+}
+
+export default function ExplorePage() {
+  const [products, setProducts] = useState<Product[]>([]);
+  const [ownedProducts, setOwnedProducts] = useState<OwnedProduct[]>([]);
+  const [questions, setQuestions] = useState<Question[]>([]);
+
+  const [searchText, setSearchText] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("All");
+  const [verificationFilter, setVerificationFilter] = useState("All");
+  const [sortBy, setSortBy] = useState<SortOption>("newest");
+
+  const [loading, setLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState("");
+
+  useEffect(() => {
+    async function loadExploreData() {
+      setLoading(true);
+      setErrorMessage("");
+
+      const { data: productsData, error: productsError } = await supabase
+        .from("products")
+        .select(
+          "id, slug, name, brand, category, image_url, description, product_verification_status, created_at"
+        )
+        .order("created_at", { ascending: false });
+
+      if (productsError) {
+        setErrorMessage(productsError.message);
+        setProducts([]);
+        setLoading(false);
+        return;
+      }
+
+      const { data: ownedProductsData } = await supabase
+        .from("owned_products")
+        .select("product_id");
+
+      const { data: questionsData } = await supabase
+        .from("questions")
+        .select("product_id");
+
+      setProducts((productsData as Product[]) || []);
+      setOwnedProducts((ownedProductsData as OwnedProduct[]) || []);
+      setQuestions((questionsData as Question[]) || []);
+      setLoading(false);
+    }
+
+    loadExploreData();
+  }, []);
+
+  const categories = useMemo(() => {
+    const uniqueCategories = Array.from(
+      new Set(
+        products
+          .map((product) => product.category)
+          .filter((category): category is string => Boolean(category))
+      )
+    ).sort();
+
+    return ["All", ...uniqueCategories];
+  }, [products]);
+
+  const ownerCountsByProductId = useMemo(() => {
+    const counts = new Map<string, number>();
+
+    ownedProducts.forEach((item) => {
+      counts.set(item.product_id, (counts.get(item.product_id) || 0) + 1);
+    });
+
+    return counts;
+  }, [ownedProducts]);
+
+  const questionCountsByProductId = useMemo(() => {
+    const counts = new Map<string, number>();
+
+    questions.forEach((item) => {
+      counts.set(item.product_id, (counts.get(item.product_id) || 0) + 1);
+    });
+
+    return counts;
+  }, [questions]);
+
+  const filteredProducts = useMemo(() => {
+    const cleanSearch = searchText.trim().toLowerCase();
+
+    const matchesFilters = products.filter((product) => {
+      const matchesSearch =
+        !cleanSearch ||
+        product.name.toLowerCase().includes(cleanSearch) ||
+        product.brand?.toLowerCase().includes(cleanSearch) ||
+        product.category?.toLowerCase().includes(cleanSearch) ||
+        product.description?.toLowerCase().includes(cleanSearch);
+
+      const matchesCategory =
+        categoryFilter === "All" || product.category === categoryFilter;
+
+      const matchesVerification =
+        verificationFilter === "All" ||
+        product.product_verification_status === verificationFilter;
+
+      return matchesSearch && matchesCategory && matchesVerification;
+    });
+
+    return [...matchesFilters].sort((firstProduct, secondProduct) => {
+      if (sortBy === "az") {
+        return firstProduct.name.localeCompare(secondProduct.name);
+      }
+
+      if (sortBy === "most_owners") {
+        const ownerDifference =
+          (ownerCountsByProductId.get(secondProduct.id) || 0) -
+          (ownerCountsByProductId.get(firstProduct.id) || 0);
+
+        if (ownerDifference !== 0) return ownerDifference;
+      }
+
+      if (sortBy === "most_questions") {
+        const questionDifference =
+          (questionCountsByProductId.get(secondProduct.id) || 0) -
+          (questionCountsByProductId.get(firstProduct.id) || 0);
+
+        if (questionDifference !== 0) return questionDifference;
+      }
+
+      return (
+        new Date(secondProduct.created_at).getTime() -
+        new Date(firstProduct.created_at).getTime()
+      );
+    });
+  }, [
+    products,
+    searchText,
+    categoryFilter,
+    verificationFilter,
+    sortBy,
+    ownerCountsByProductId,
+    questionCountsByProductId,
+  ]);
+
+  function getOwnerCount(productId: string) {
+    return ownerCountsByProductId.get(productId) || 0;
+  }
+
+  function getQuestionCount(productId: string) {
+    return questionCountsByProductId.get(productId) || 0;
+  }
+
+  if (loading) {
     return (
       <main className="mx-auto max-w-6xl px-5 py-12">
-        <div className="card">
-          <p className="font-bold text-red-600">Supabase error</p>
-          <h1 className="mt-2 text-3xl font-black">Could not load products</h1>
-          <pre className="mt-4 overflow-auto rounded-2xl bg-slate-100 p-4 text-sm">
-            {error.message}
-          </pre>
+        <div className="card p-6">
+          <h1 className="text-3xl font-black">Loading products...</h1>
         </div>
       </main>
     );
@@ -33,69 +191,155 @@ export default async function ExplorePage() {
 
   return (
     <main className="mx-auto max-w-6xl px-5 py-12">
-      <div className="mb-8">
+      <section className="mb-8">
         <p className="font-bold text-muted">Explore</p>
-        <h1 className="text-4xl font-black">
+        <h1 className="mt-2 text-4xl font-black">
           Find products and ask real owners
         </h1>
+        <p className="mt-3 max-w-2xl text-muted">
+          Search the catalog, filter by category, and open product pages to ask
+          real owners before buying.
+        </p>
 
-        <div className="mt-6 grid gap-3 md:grid-cols-[1fr_auto]">
-          <input
-            className="input"
-            placeholder="Search headphones, microphones, cameras..."
-          />
-          <button className="btn btn-dark">Search</button>
-        </div>
-      </div>
-
-      {!products || products.length === 0 ? (
-        <div className="card">
-          <h2 className="text-xl font-black">No products found</h2>
-          <p className="mt-2 text-slate-600">
-            Your Supabase products table is empty.
+        {errorMessage && (
+          <p className="mt-4 rounded-2xl bg-red-50 p-4 text-sm font-bold text-red-700">
+            {errorMessage}
           </p>
-        </div>
-      ) : (
-        <div className="grid gap-5 md:grid-cols-3">
-          {products.map((product: Product) => (
-            <Link
-              key={product.id}
-              href={`/product/${product.slug}`}
-              className="card block transition hover:-translate-y-1 hover:shadow-md"
+        )}
+      </section>
+
+      <section className="card mb-8 p-5">
+        <div className="grid gap-4 md:grid-cols-[1fr_180px_220px_180px]">
+          <div>
+            <label className="label">Search</label>
+            <input
+              className="input mt-2"
+              value={searchText}
+              onChange={(event) => setSearchText(event.target.value)}
+              placeholder="Search headphones, cameras, microphones..."
+            />
+          </div>
+
+          <div>
+            <label className="label">Category</label>
+            <select
+              className="input mt-2"
+              value={categoryFilter}
+              onChange={(event) => setCategoryFilter(event.target.value)}
             >
-              <div className="mb-4 overflow-hidden rounded-2xl bg-slate-100">
-                {product.image_url ? (
-                  <img
-                    src={product.image_url}
-                    alt={product.name}
-                    className="h-44 w-full object-cover"
-                  />
-                ) : (
-                  <div className="flex h-44 items-center justify-center text-slate-400">
-                    No image
-                  </div>
-                )}
-              </div>
+              {categories.map((category) => (
+                <option key={category}>{category}</option>
+              ))}
+            </select>
+          </div>
 
-              <div className="flex flex-wrap items-center gap-2 text-sm text-slate-500">
-                <span>{product.brand || "Unknown brand"}</span>
-                <span>•</span>
-                <span>{product.category || "Uncategorized"}</span>
-              </div>
+          <div>
+            <label className="label">Verification</label>
+            <select
+              className="input mt-2"
+              value={verificationFilter}
+              onChange={(event) => setVerificationFilter(event.target.value)}
+            >
+              <option value="All">All</option>
+              <option value="catalog_verified">Catalog verified</option>
+              <option value="user_submitted">User-submitted</option>
+              <option value="needs_review">Needs review</option>
+              <option value="rejected">Rejected</option>
+            </select>
+          </div>
 
-              <h2 className="mt-2 text-xl font-black">{product.name}</h2>
-
-              <p className="mt-3 line-clamp-3 text-sm leading-6 text-slate-600">
-                {product.description ||
-                  "Ask real owners questions about this product before buying."}
-              </p>
-
-              <div className="mt-5 text-sm font-bold">
-                View product →
-              </div>
-            </Link>
-          ))}
+          <div>
+            <label className="label">Sort</label>
+            <select
+              className="input mt-2"
+              value={sortBy}
+              onChange={(event) => setSortBy(event.target.value as SortOption)}
+            >
+              <option value="newest">Newest</option>
+              <option value="az">A-Z</option>
+              <option value="most_owners">Most owners</option>
+              <option value="most_questions">Most questions</option>
+            </select>
+          </div>
         </div>
+
+        <p className="mt-4 text-sm font-bold text-muted">
+          Showing {filteredProducts.length} of {products.length} products
+        </p>
+      </section>
+
+      {filteredProducts.length === 0 ? (
+        <section className="card p-6">
+          <h2 className="text-2xl font-black">No products found</h2>
+          <p className="mt-3 text-muted">
+            Try changing the search or filters, or create a new product page.
+          </p>
+          <Link href="/add-product" className="btn btn-dark mt-5">
+            Add product
+          </Link>
+        </section>
+      ) : (
+        <section className="grid gap-5 md:grid-cols-2 lg:grid-cols-3">
+          {filteredProducts.map((product) => {
+            const ownerCount = getOwnerCount(product.id);
+            const questionCount = getQuestionCount(product.id);
+
+            return (
+              <Link
+                key={product.id}
+                href={`/product/${product.slug}`}
+                className="card block overflow-hidden hover:-translate-y-1 hover:shadow-md"
+              >
+                <div className="h-48 bg-slate-100">
+                  {product.image_url ? (
+                    <img
+                      src={product.image_url}
+                      alt={product.name}
+                      className="h-full w-full object-cover"
+                    />
+                  ) : (
+                    <div className="flex h-full items-center justify-center text-muted">
+                      No image
+                    </div>
+                  )}
+                </div>
+
+                <div className="p-5">
+                  <div className="flex flex-wrap items-center gap-2 text-sm font-bold text-muted">
+                    <span>{product.brand || "Unknown brand"}</span>
+                    <span>·</span>
+                    <span>{product.category || "Uncategorized"} </span>
+                  </div>
+
+                  <h2 className="mt-2 text-xl font-black">{product.name}</h2>
+
+                  <p className="mt-3 line-clamp-2 text-sm leading-6 text-muted">
+                    {product.description ||
+                      "Ask real owners about this product before buying."}
+                  </p>
+
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
+                      {getProductVerificationLabel(
+                        product.product_verification_status
+                      )}
+                    </span>
+
+                    <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
+                      {ownerCount} owners
+                    </span>
+
+                    <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
+                      {questionCount} questions
+                    </span>
+                  </div>
+
+                  <p className="mt-5 text-sm font-black">View product →</p>
+                </div>
+              </Link>
+            );
+          })}
+        </section>
       )}
     </main>
   );
