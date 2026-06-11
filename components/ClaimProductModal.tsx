@@ -18,6 +18,7 @@ type ClaimProductModalProps = {
   category?: string | null;
   triggerClassName?: string;
   triggerLabel?: string;
+  defaultOpen?: boolean;
 };
 
 type ExistingClaim = {
@@ -90,10 +91,12 @@ export function ClaimProductModal({
   category,
   triggerClassName = "btn",
   triggerLabel,
+  defaultOpen = false,
 }: ClaimProductModalProps) {
   const [open, setOpen] = useState(false);
   const [step, setStep] = useState<Step>("claim");
   const [existingClaim, setExistingClaim] = useState<ExistingClaim | null>(null);
+  const [scorecardCompleted, setScorecardCompleted] = useState(false);
   const [trustScore, setTrustScore] = useState(0);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
@@ -114,6 +117,12 @@ export function ClaimProductModal({
   const ownerLevel = existingClaim
     ? getOwnerLevel(existingClaim.verification_status, trustScore)
     : null;
+
+  useEffect(() => {
+    if (defaultOpen) {
+      setOpen(true);
+    }
+  }, [defaultOpen]);
 
   useEffect(() => {
     let active = true;
@@ -144,6 +153,16 @@ export function ClaimProductModal({
 
       setTrustScore(profile?.trust_score || 0);
       setExistingClaim(claim as ExistingClaim);
+
+      const { data: ownerRating } = await supabase
+        .from("owner_product_ratings")
+        .select("id")
+        .eq("owned_product_id", claim.id)
+        .maybeSingle();
+
+      if (active) {
+        setScorecardCompleted(Boolean(ownerRating));
+      }
     }
 
     loadTriggerState();
@@ -202,9 +221,18 @@ export function ClaimProductModal({
         setVerificationChallenge(
           typedClaim.verification_challenge || createVerificationChallenge()
         );
+
+        const { data: ownerRating } = await supabase
+          .from("owner_product_ratings")
+          .select("id")
+          .eq("owned_product_id", typedClaim.id)
+          .maybeSingle();
+
+        setScorecardCompleted(Boolean(ownerRating));
         setStep("manage");
       } else {
         setExistingClaim(null);
+        setScorecardCompleted(false);
         setVerificationCode(createVerificationCode());
         setStep("claim");
       }
@@ -489,7 +517,9 @@ export function ClaimProductModal({
                   and build trust as a real owner.
                 </p>
                 <Link
-                  href={`/auth?redirect=/product/${productSlug}`}
+                  href={`/auth?redirect=${encodeURIComponent(
+                    `/product/${productSlug}?claim=1`
+                  )}`}
                   className="btn btn-dark mt-4 w-full justify-center"
                 >
                   Sign in
@@ -763,20 +793,46 @@ export function ClaimProductModal({
 
             {step === "rating" && existingClaim && !loading && (
               <div className="mt-5 space-y-4">
-                <div>
-                  <h3 className="font-black">Add your owner rating</h3>
-                  <p className="mt-2 text-sm font-bold text-muted">
-                    Rate the buying factors people ask real owners about.
-                  </p>
-                </div>
-                <OwnerCriteriaRatingForm
-                  productId={productId}
-                  ownedProductId={existingClaim.id}
-                  category={category}
-                />
-                <button type="button" className="btn w-full justify-center" onClick={closeModal}>
-                  Do this later
-                </button>
+                {scorecardCompleted ? (
+                  <div className="rounded-2xl bg-emerald-50 p-4">
+                    <h3 className="font-black text-emerald-900">
+                      Owner scorecard saved
+                    </h3>
+                    <p className="mt-2 text-sm font-bold text-emerald-800">
+                      Thanks. Your owner rating is now attached to this product.
+                    </p>
+                    <Link
+                      href={`/product/${productSlug}`}
+                      className="btn btn-dark mt-4 w-full justify-center"
+                    >
+                      Back to product
+                    </Link>
+                  </div>
+                ) : (
+                  <>
+                    <div>
+                      <h3 className="font-black">Add your owner rating</h3>
+                      <p className="mt-2 text-sm font-bold text-muted">
+                        Rate the buying factors people ask real owners about.
+                      </p>
+                    </div>
+                    <OwnerCriteriaRatingForm
+                      productId={productId}
+                      ownedProductId={existingClaim.id}
+                      category={category}
+                      onSaved={() => {
+                        setScorecardCompleted(true);
+                        setMessage("Owner scorecard saved. Returning to product...");
+                        window.setTimeout(() => {
+                          window.location.href = `/product/${productSlug}`;
+                        }, 900);
+                      }}
+                    />
+                    <button type="button" className="btn w-full justify-center" onClick={closeModal}>
+                      Do this later
+                    </button>
+                  </>
+                )}
               </div>
             )}
 

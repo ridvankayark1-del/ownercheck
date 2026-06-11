@@ -19,6 +19,9 @@ type PageProps = {
   params: Promise<{
     slug: string;
   }>;
+  searchParams?: Promise<{
+    claim?: string;
+  }>;
 };
 
 type Profile = {
@@ -215,8 +218,10 @@ function getProductVerificationLabel(status?: string | null) {
   return "User-submitted product";
 }
 
-export default async function ProductPage({ params }: PageProps) {
+export default async function ProductPage({ params, searchParams }: PageProps) {
   const { slug } = await params;
+  const query = await searchParams;
+  const shouldOpenClaim = query?.claim === "1";
 
   const { data: product, error } = await supabase
     .from("products")
@@ -514,6 +519,7 @@ export default async function ProductPage({ params }: PageProps) {
                 productSlug={product.slug}
                 category={product.category}
                 triggerClassName="btn w-full sm:w-auto"
+                defaultOpen={shouldOpenClaim}
               />
               {externalSourceLinks.length > 0 && (
                 <a href="#external-sources" className="btn w-full sm:w-auto">

@@ -186,7 +186,9 @@ security definer
 set search_path = public
 as $$
 begin
-  if public.is_admin() then
+  if public.is_admin()
+    or current_setting('ownercheck.secure_credit_flow', true) = 'on'
+  then
     return new;
   end if;
 
@@ -316,6 +318,105 @@ create trigger prevent_direct_question_protected_updates
 before update on public.direct_questions
 for each row execute function public.prevent_direct_question_protected_updates();
 
+create or replace function public.create_direct_question(
+  product_id_input uuid,
+  question_text_input text
+)
+returns public.direct_questions
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  buyer_id_value uuid := auth.uid();
+  buyer_credits integer;
+  selected_owner_id uuid;
+  created_question public.direct_questions;
+begin
+  if buyer_id_value is null then
+    raise exception 'Log in to ask an owner directly.';
+  end if;
+
+  if nullif(trim(question_text_input), '') is null then
+    raise exception 'Write a direct question first.';
+  end if;
+
+  select credit_balance
+  into buyer_credits
+  from public.profiles
+  where id = buyer_id_value
+  for update;
+
+  if not found then
+    raise exception 'Could not load your credits.';
+  end if;
+
+  if buyer_credits < 25 then
+    raise exception 'You need at least 25 credits to ask an owner directly.';
+  end if;
+
+  select owned_products.user_id
+  into selected_owner_id
+  from public.owned_products
+  where owned_products.product_id = product_id_input
+    and owned_products.user_id <> buyer_id_value
+    and owned_products.verification_status in ('photo_verified', 'photo_submitted', 'unverified')
+  order by
+    case owned_products.verification_status
+      when 'photo_verified' then 0
+      when 'photo_submitted' then 1
+      else 2
+    end,
+    owned_products.created_at asc
+  limit 1;
+
+  if selected_owner_id is null then
+    raise exception 'No available owners yet. Ask a public question instead.';
+  end if;
+
+  perform set_config('ownercheck.secure_credit_flow', 'on', true);
+
+  insert into public.direct_questions (
+    product_id,
+    buyer_id,
+    owner_id,
+    question_text,
+    status,
+    credit_cost,
+    credit_reward
+  )
+  values (
+    product_id_input,
+    buyer_id_value,
+    selected_owner_id,
+    trim(question_text_input),
+    'pending',
+    25,
+    20
+  )
+  returning * into created_question;
+
+  update public.profiles
+  set credit_balance = credit_balance - 25
+  where id = buyer_id_value;
+
+  insert into public.credit_transactions (
+    user_id,
+    amount,
+    reason
+  )
+  values (
+    buyer_id_value,
+    -25,
+    'Asked an owner directly'
+  );
+
+  return created_question;
+end;
+$$;
+
+grant execute on function public.create_direct_question(uuid, text) to authenticated;
+
 alter table public.profiles enable row level security;
 alter table public.admin_users enable row level security;
 alter table public.products enable row level security;
@@ -432,15 +533,8 @@ create policy "Buyers can read own direct questions" on public.direct_questions 
 -- Assigned owners can read direct questions sent to them.
 create policy "Owners can read assigned direct questions" on public.direct_questions for select using (auth.uid() = owner_id);
 
--- Buyers can create direct questions with default credit fields only.
-create policy "Buyers can create direct questions" on public.direct_questions for insert with check (
-  auth.uid() = buyer_id
-  and status = 'pending'
-  and answer_text is null
-  and answered_at is null
-  and credit_cost = 25
-  and credit_reward = 20
-);
+-- Direct question inserts must use create_direct_question so credits are deducted atomically.
+create policy "Direct question inserts require secure RPC" on public.direct_questions for insert with check (false);
 
 -- Assigned owners can only answer pending direct questions; protected fields are guarded by trigger.
 create policy "Owners can answer assigned direct questions" on public.direct_questions for update using (auth.uid() = owner_id) with check (auth.uid() = owner_id);

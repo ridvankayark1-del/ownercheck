@@ -3,6 +3,17 @@
 import { useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 
+function getRedirectTarget() {
+  const params = new URLSearchParams(window.location.search);
+  const target = params.get("redirect") || params.get("next") || "/profile";
+
+  if (!target.startsWith("/") || target.startsWith("//")) {
+    return "/profile";
+  }
+
+  return target;
+}
+
 export default function AuthPage() {
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [email, setEmail] = useState("");
@@ -45,7 +56,7 @@ export default function AuthPage() {
 
       setMessage("Account created. You can now use the app.");
       setLoading(false);
-      window.location.href = "/profile";
+      window.location.href = getRedirectTarget();
       return;
     }
 
@@ -61,7 +72,7 @@ export default function AuthPage() {
     }
 
     setLoading(false);
-    window.location.href = "/profile";
+    window.location.href = getRedirectTarget();
   }
 
   return (

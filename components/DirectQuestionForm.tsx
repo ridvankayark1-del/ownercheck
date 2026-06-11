@@ -7,19 +7,7 @@ type DirectQuestionFormProps = {
   productId: string;
 };
 
-type EligibleOwner = {
-  user_id: string;
-  verification_status: string;
-  created_at: string;
-};
-
 const DIRECT_QUESTION_COST = 25;
-
-function getVerificationPriority(status: string) {
-  if (status === "photo_verified") return 0;
-  if (status === "photo_submitted") return 1;
-  return 2;
-}
 
 export function DirectQuestionForm({ productId }: DirectQuestionFormProps) {
   const [questionText, setQuestionText] = useState("");
@@ -49,114 +37,14 @@ export function DirectQuestionForm({ productId }: DirectQuestionFormProps) {
       return;
     }
 
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("credit_balance")
-      .eq("id", user.id)
-      .single();
+    const { error } = await supabase.rpc("create_direct_question", {
+      product_id_input: productId,
+      question_text_input: text,
+    });
 
-    if (profileError || !profile) {
+    if (error) {
       setLoading(false);
-      setMessage("Could not load your credits.");
-      return;
-    }
-
-    if ((profile.credit_balance || 0) < DIRECT_QUESTION_COST) {
-      setLoading(false);
-      setMessage("You need at least 25 credits to ask an owner directly.");
-      return;
-    }
-
-    const { data: ownersData, error: ownersError } = await supabase
-      .from("owned_products")
-      .select("user_id, verification_status, created_at")
-      .eq("product_id", productId)
-      .neq("user_id", user.id)
-      .in("verification_status", [
-        "photo_verified",
-        "photo_submitted",
-        "unverified",
-      ]);
-
-    if (ownersError) {
-      setLoading(false);
-      setMessage(ownersError.message);
-      return;
-    }
-
-    const eligibleOwners = ((ownersData || []) as EligibleOwner[])
-      .filter((owner) => owner.user_id)
-      .sort((firstOwner, secondOwner) => {
-        const priorityDifference =
-          getVerificationPriority(firstOwner.verification_status) -
-          getVerificationPriority(secondOwner.verification_status);
-
-        if (priorityDifference !== 0) return priorityDifference;
-
-        return (
-          new Date(firstOwner.created_at).getTime() -
-          new Date(secondOwner.created_at).getTime()
-        );
-      });
-
-    const selectedOwner = eligibleOwners[0];
-
-    if (!selectedOwner) {
-      setLoading(false);
-      setMessage("No available owners yet. Ask a public question instead.");
-      return;
-    }
-
-    const { data: directQuestion, error: directQuestionError } = await supabase
-      .from("direct_questions")
-      .insert({
-        product_id: productId,
-        buyer_id: user.id,
-        owner_id: selectedOwner.user_id,
-        question_text: text,
-        status: "pending",
-        credit_cost: DIRECT_QUESTION_COST,
-        credit_reward: 20,
-      })
-      .select("id")
-      .single();
-
-    if (directQuestionError || !directQuestion) {
-      setLoading(false);
-      setMessage(
-        directQuestionError?.message || "Could not send direct question."
-      );
-      return;
-    }
-
-    const { error: creditError } = await supabase
-      .from("profiles")
-      .update({
-        credit_balance: (profile.credit_balance || 0) - DIRECT_QUESTION_COST,
-      })
-      .eq("id", user.id);
-
-    if (creditError) {
-      setLoading(false);
-      setMessage(
-        `Direct question was created, but credits could not be deducted: ${creditError.message}`
-      );
-      return;
-    }
-
-    const { error: transactionError } = await supabase
-      .from("credit_transactions")
-      .insert({
-        user_id: user.id,
-        amount: -DIRECT_QUESTION_COST,
-        reason: "Asked an owner directly",
-      });
-
-    if (transactionError) {
-      setLoading(false);
-      setMessage(
-        `Direct question was created, but the credit transaction could not be recorded: ${transactionError.message}`
-      );
+      setMessage(error.message || "Could not send direct question.");
       return;
     }
 
