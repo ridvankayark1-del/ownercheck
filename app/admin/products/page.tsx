@@ -3,11 +3,10 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { ProductImage } from "@/components/ProductImage";
+import { checkCurrentUserIsAdmin } from "@/lib/adminClient";
 import { isPlaceholderImage } from "@/lib/productImages";
 import { normalizeCategory } from "@/lib/productCategoryProfiles";
 import { supabase } from "@/lib/supabaseClient";
-
-const ADMIN_EMAIL = "reportkowalski1@gmail.com";
 
 type Product = {
   id: string;
@@ -110,7 +109,9 @@ export default function AdminProductsPage() {
 
     setLoggedIn(true);
 
-    if (user.email !== ADMIN_EMAIL) {
+    const adminCheck = await checkCurrentUserIsAdmin();
+
+    if (!adminCheck.isAdmin) {
       setIsAdmin(false);
       setMessage("You do not have admin access.");
       setLoading(false);
@@ -303,7 +304,13 @@ export default function AdminProductsPage() {
       data: { user },
     } = await supabase.auth.getUser();
 
-    if (!user || user.email !== ADMIN_EMAIL) {
+    if (!user) {
+      throw new Error("You do not have admin access.");
+    }
+
+    const adminCheck = await checkCurrentUserIsAdmin();
+
+    if (!adminCheck.isAdmin) {
       throw new Error("You do not have admin access.");
     }
 

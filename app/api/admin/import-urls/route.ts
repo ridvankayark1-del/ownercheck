@@ -1,23 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import {
+  createAuthorizedSupabaseClient,
+  requireDatabaseAdmin,
+} from "@/lib/adminAuth";
 import { findProductImage } from "@/lib/productImages";
 
-const ADMIN_EMAIL = "reportkowalski1@gmail.com";
-
-function createSupabaseClient(authorizationHeader: string | null) {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
-
-  if (!supabaseUrl || !supabaseKey) {
-    throw new Error("Missing Supabase environment variables.");
-  }
-
-  return createClient(supabaseUrl, supabaseKey, {
-    global: {
-      headers: authorizationHeader ? { Authorization: authorizationHeader } : {},
-    },
-  });
-}
+type SupabaseClient = ReturnType<typeof createAuthorizedSupabaseClient>;
 
 function slugify(value: string) {
   return value
@@ -87,7 +75,7 @@ function buildImportedProductCopy(name: string, brand: string | null, category: 
 }
 
 async function createUniqueSlug(
-  supabase: ReturnType<typeof createSupabaseClient>,
+  supabase: SupabaseClient,
   baseSlug: string
 ) {
   let candidate = baseSlug || "imported-product";
@@ -115,13 +103,12 @@ export async function POST(request: NextRequest) {
       category?: string;
     };
 
-    const supabase = createSupabaseClient(request.headers.get("authorization"));
-    const {
-      data: { user },
-      error: userError,
-    } = await supabase.auth.getUser();
+    const supabase = createAuthorizedSupabaseClient(
+      request.headers.get("authorization")
+    );
+    const { isAdmin } = await requireDatabaseAdmin(supabase);
 
-    if (userError || !user || user.email !== ADMIN_EMAIL) {
+    if (!isAdmin) {
       return NextResponse.json({ error: "Forbidden." }, { status: 403 });
     }
 

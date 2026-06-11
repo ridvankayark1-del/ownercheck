@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import {
+  createAuthorizedSupabaseClient,
+  requireDatabaseAdmin,
+} from "@/lib/adminAuth";
 import { findProductImage, isPlaceholderImage } from "@/lib/productImages";
 import {
   buildCategoryDescription,
@@ -8,8 +11,6 @@ import {
   inferCategory as inferProfileCategory,
   normalizeBrand as normalizeProfileBrand,
 } from "@/lib/productCategoryProfiles";
-
-const ADMIN_EMAIL = "reportkowalski1@gmail.com";
 
 type Product = {
   id: string;
@@ -187,25 +188,6 @@ const BEST_FOR_RULES: SignalRule[] = [
   { keywords: ["music"], label: "Music listening" },
   { keywords: ["office", "work"], label: "Work" },
 ];
-
-function createSupabaseClient(authorizationHeader: string | null) {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
-
-  if (!supabaseUrl || !supabaseKey) {
-    throw new Error("Missing Supabase environment variables.");
-  }
-
-  return createClient(supabaseUrl, supabaseKey, {
-    global: {
-      headers: authorizationHeader
-        ? {
-            Authorization: authorizationHeader,
-          }
-        : {},
-    },
-  });
-}
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -957,16 +939,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const supabase = createSupabaseClient(
+    const supabase = createAuthorizedSupabaseClient(
       request.headers.get("authorization")
     );
+    const { isAdmin } = await requireDatabaseAdmin(supabase);
 
-    const {
-      data: { user },
-      error: userError,
-    } = await supabase.auth.getUser();
-
-    if (userError || !user || user.email !== ADMIN_EMAIL) {
+    if (!isAdmin) {
       return NextResponse.json({ error: "Forbidden." }, { status: 403 });
     }
 

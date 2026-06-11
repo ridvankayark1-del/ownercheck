@@ -2,9 +2,8 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { checkCurrentUserIsAdmin } from "@/lib/adminClient";
 import { supabase } from "@/lib/supabaseClient";
-
-const ADMIN_EMAIL = "reportkowalski1@gmail.com";
 
 type ProductInfo = {
   slug: string;
@@ -42,6 +41,7 @@ type OwnerVerification = {
   verification_capture_method: string | null;
   verification_token_expires_at: string | null;
   verification_photo_url: string | null;
+  signed_photo_url: string | null;
   products: ProductInfo | null;
   profiles: ProfileInfo | null;
 };
@@ -75,6 +75,28 @@ function getCaptureMethodBadgeClass(method?: string | null) {
   return "bg-slate-100 text-slate-700";
 }
 
+function getVerificationPhotoPath(value: string | null) {
+  if (!value) return null;
+
+  if (!value.startsWith("http")) {
+    return value.replace(/^\/+/, "");
+  }
+
+  try {
+    const url = new URL(value);
+    const marker = "/owner-verifications/";
+    const markerIndex = url.pathname.indexOf(marker);
+
+    if (markerIndex >= 0) {
+      return decodeURIComponent(url.pathname.slice(markerIndex + marker.length));
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
 export default function AdminOwnerVerificationsPage() {
   const [loading, setLoading] = useState(true);
   const [loggedIn, setLoggedIn] = useState(false);
@@ -99,7 +121,9 @@ export default function AdminOwnerVerificationsPage() {
 
     setLoggedIn(true);
 
-    if (user.email !== ADMIN_EMAIL) {
+    const adminCheck = await checkCurrentUserIsAdmin();
+
+    if (!adminCheck.isAdmin) {
       setIsAdmin(false);
       setMessage("You do not have admin access.");
       setLoading(false);
@@ -120,11 +144,21 @@ export default function AdminOwnerVerificationsPage() {
       setMessage(error.message);
       setVerifications([]);
     } else {
-      const normalized = ((data || []) as RawOwnerVerification[]).map(
-        (item) => ({
+      const normalized = await Promise.all(
+        ((data || []) as RawOwnerVerification[]).map(async (item) => {
+          const photoPath = getVerificationPhotoPath(item.verification_photo_url);
+          const signedPhotoUrl = photoPath
+            ? await supabase.storage
+                .from("owner-verifications")
+                .createSignedUrl(photoPath, 60 * 60)
+            : null;
+
+          return {
           ...item,
           products: normalizeSingle(item.products),
           profiles: normalizeSingle(item.profiles),
+          signed_photo_url: signedPhotoUrl?.data?.signedUrl || null,
+          };
         })
       );
 
@@ -148,7 +182,14 @@ export default function AdminOwnerVerificationsPage() {
       data: { user },
     } = await supabase.auth.getUser();
 
-    if (!user || user.email !== ADMIN_EMAIL) {
+    if (!user) {
+      setMessage("You do not have admin access.");
+      return;
+    }
+
+    const adminCheck = await checkCurrentUserIsAdmin();
+
+    if (!adminCheck.isAdmin) {
       setMessage("You do not have admin access.");
       return;
     }
@@ -260,14 +301,14 @@ export default function AdminOwnerVerificationsPage() {
             <div key={verification.id} className="card p-5">
               <div className="grid gap-5 md:grid-cols-[220px_1fr]">
                 <div className="overflow-hidden rounded-2xl bg-slate-100">
-                  {verification.verification_photo_url ? (
+                  {verification.signed_photo_url ? (
                     <a
-                      href={verification.verification_photo_url}
+                      href={verification.signed_photo_url}
                       target="_blank"
                       rel="noreferrer"
                     >
                       <img
-                        src={verification.verification_photo_url}
+                        src={verification.signed_photo_url}
                         alt="Owner verification"
                         className="h-56 w-full object-cover"
                       />

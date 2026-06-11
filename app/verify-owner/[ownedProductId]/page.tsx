@@ -113,7 +113,7 @@ export default function VerifyOwnerPage() {
 
     setSubmitting(true);
 
-    const filePath = `phone-verifications/${claim.id}-${Date.now()}.jpg`;
+    const filePath = `phone-verifications/${claim.id}/${Date.now()}.jpg`;
     const { error: uploadError } = await supabase.storage
       .from("owner-verifications")
       .upload(filePath, capturedPhoto);
@@ -124,16 +124,12 @@ export default function VerifyOwnerPage() {
       return;
     }
 
-    const { data } = supabase.storage
-      .from("owner-verifications")
-      .getPublicUrl(filePath);
-
     const { error: rpcError } = await supabase.rpc(
       "submit_owner_phone_verification",
       {
         owned_product_id_input: claim.id,
         verification_token_input: token,
-        photo_url_input: data.publicUrl,
+        photo_url_input: filePath,
       }
     );
 

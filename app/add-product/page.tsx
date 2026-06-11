@@ -134,9 +134,7 @@ export default function AddProductPage() {
         ai_generated: true,
 
         // Product verification fields
-        product_verification_status: cleanSourceUrl
-          ? "user_submitted"
-          : "needs_review",
+        product_verification_status: "user_submitted",
         source_url: cleanSourceUrl || null,
         verified_source: null,
         external_product_id: null,

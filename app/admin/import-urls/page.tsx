@@ -2,9 +2,8 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { checkCurrentUserIsAdmin } from "@/lib/adminClient";
 import { supabase } from "@/lib/supabaseClient";
-
-const ADMIN_EMAIL = "reportkowalski1@gmail.com";
 
 type ImportRow = {
   url: string;
@@ -37,7 +36,8 @@ export default function AdminImportUrlsPage() {
       }
 
       setLoggedIn(true);
-      setIsAdmin(user.email === ADMIN_EMAIL);
+      const adminCheck = await checkCurrentUserIsAdmin();
+      setIsAdmin(adminCheck.isAdmin);
       setLoading(false);
     }
 

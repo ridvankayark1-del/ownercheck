@@ -337,10 +337,6 @@ export function ClaimProductModal({
       return;
     }
 
-    const { data } = supabase.storage
-      .from("owner-verifications")
-      .getPublicUrl(filePath);
-
     const previousStatus = existingClaim.verification_status;
     const nextStatus =
       previousStatus === "photo_verified" ? "photo_verified" : "photo_submitted";
@@ -349,7 +345,7 @@ export function ClaimProductModal({
       .from("owned_products")
       .update({
         verification_status: nextStatus,
-        verification_photo_url: data.publicUrl,
+        verification_photo_url: filePath,
         verification_code: verificationCode,
         verification_challenge: verificationChallenge,
         verification_capture_method: method,

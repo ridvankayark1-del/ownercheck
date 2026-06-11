@@ -2,14 +2,13 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { checkCurrentUserIsAdmin } from "@/lib/adminClient";
 import { supabase } from "@/lib/supabaseClient";
-
-const ADMIN_EMAIL = "reportkowalski1@gmail.com";
 
 export function Header() {
   const [loggedIn, setLoggedIn] = useState(false);
   const [ready, setReady] = useState(false);
-  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [pendingDirectRequestCount, setPendingDirectRequestCount] = useState(0);
 
   useEffect(() => {
@@ -34,11 +33,13 @@ export function Header() {
       } = await supabase.auth.getUser();
 
       setLoggedIn(!!user);
-      setUserEmail(user?.email || null);
       if (user) {
         await loadPendingDirectRequestCount(user.id);
+        const adminCheck = await checkCurrentUserIsAdmin();
+        setIsAdmin(adminCheck.isAdmin);
       } else {
         setPendingDirectRequestCount(0);
+        setIsAdmin(false);
       }
       setReady(true);
     }
@@ -49,11 +50,14 @@ export function Header() {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
       setLoggedIn(!!session?.user);
-      setUserEmail(session?.user?.email || null);
       if (session?.user) {
         loadPendingDirectRequestCount(session.user.id);
+        checkCurrentUserIsAdmin().then((adminCheck) => {
+          setIsAdmin(adminCheck.isAdmin);
+        });
       } else {
         setPendingDirectRequestCount(0);
+        setIsAdmin(false);
       }
       setReady(true);
     });
@@ -91,9 +95,7 @@ export function Header() {
               </Link>
               <Link href="/profile">Profile</Link>
 
-              {userEmail === ADMIN_EMAIL && (
-                <Link href="/admin/products">Admin</Link>
-              )}
+              {isAdmin && <Link href="/admin/products">Admin</Link>}
 
               <button type="button" onClick={signOut} className="btn">
                 Sign out
