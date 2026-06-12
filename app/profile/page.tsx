@@ -468,10 +468,10 @@ export default function ProfilePage() {
       </section>
 
       <section className="card mt-8 p-6">
-        <h2 className="text-2xl font-black">Direct Requests</h2>
+        <h2 className="text-2xl font-black">Private chat requests</h2>
 
         {directQuestions.length === 0 ? (
-          <p className="mt-3 text-muted">No direct requests sent yet.</p>
+          <p className="mt-3 text-muted">No private chat requests sent yet.</p>
         ) : (
           <div className="mt-5 grid gap-4 md:grid-cols-2">
             {directQuestions.map((question) => {

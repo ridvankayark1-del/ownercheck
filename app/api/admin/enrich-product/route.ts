@@ -9,8 +9,10 @@ import {
   buildCategoryOverview,
   extractCategorySpecs,
   inferCategory as inferProfileCategory,
+  normalizeCategory,
   normalizeBrand as normalizeProfileBrand,
 } from "@/lib/productCategoryProfiles";
+import { guardProductTaxonomy } from "@/lib/productTaxonomy";
 
 type Product = {
   id: string;
@@ -19,6 +21,10 @@ type Product = {
   category: string | null;
   image_url: string | null;
   source_url: string | null;
+  specs?: ProductSpecs | null;
+  identity_approved_at?: string | null;
+  specs_approved_at?: string | null;
+  image_approved_at?: string | null;
 };
 
 type BraveSearchResult = {
@@ -299,7 +305,12 @@ function includesAny(value: string, keywords: string[]) {
 
 function hasMeaningfulCategory(category?: string | null) {
   const normalized = category?.trim().toLowerCase();
-  return Boolean(normalized && normalized !== "other" && normalized !== "product");
+  return Boolean(
+    normalized &&
+      normalized !== "other" &&
+      normalized !== "product" &&
+      normalizeCategory(category) !== "Other"
+  );
 }
 
 function inferCategory({
@@ -316,7 +327,7 @@ function inferCategory({
   snippets: string[];
 }) {
   if (hasMeaningfulCategory(existingCategory)) {
-    return cleanText(existingCategory as string);
+    return normalizeCategory(existingCategory);
   }
 
   const primaryHaystack = `${name} ${brand || ""} ${sourceUrl || ""}`.toLowerCase();
@@ -422,7 +433,7 @@ function inferProductType({
   }
 
   if (normalizedCategory.includes("headphone")) {
-    if (includesAny(haystack, ["earbuds", "earbud", "in-ear", "in ear", "airpods pro"])) {
+    if (includesAny(haystack, ["earbuds", "earbud", "in-ear", "in ear", "airpods"])) {
       return "Wireless earbuds";
     }
     if (includesAny(haystack, ["over-ear", "over ear", "airpods max", "wh-1000xm", "quietcomfort", "momentum wireless"])) {
@@ -950,7 +961,7 @@ export async function POST(request: NextRequest) {
 
     const { data: product, error: productError } = await supabase
       .from("products")
-      .select("id, name, brand, category, image_url, source_url")
+      .select("id, name, brand, category, image_url, source_url, specs, identity_approved_at, specs_approved_at, image_approved_at")
       .eq("id", productId)
       .single();
 
@@ -979,6 +990,13 @@ export async function POST(request: NextRequest) {
         ? cleanProductText(originalProduct, originalProduct.category)
         : null,
     };
+    if (
+      /airpods\s*3|airpods\s*\(?3rd generation\)?/i.test(cleanProduct.name)
+    ) {
+      cleanProduct.name = "Apple AirPods (3rd generation)";
+      cleanProduct.brand = "Apple";
+      cleanProduct.category = "Headphones";
+    }
 
     const braveSources = await searchBrave(cleanProduct, braveApiKey);
     const snippets = braveSources
@@ -1003,7 +1021,20 @@ export async function POST(request: NextRequest) {
       sourceUrl: enrichedProduct.source_url,
       snippets,
     });
+    const taxonomy = guardProductTaxonomy({
+      title: enrichedProduct.name,
+      brand: enrichedProduct.brand,
+      category: correctedCategory,
+      productType: specs.product_type,
+    });
+    specs.category = normalizeCategory(taxonomy.category);
+    specs.product_type = taxonomy.productType;
     const productType = specs.product_type;
+    const categoryConfidence =
+      correctedCategory && correctedCategory !== "Other"
+        ? Math.max(0.25, taxonomy.confidence)
+        : 0.25;
+    const specsConfidence = snippets.length >= 2 && taxonomy.confidence >= 0.55 ? 0.6 : 0.25;
     const fallbackSources = getFallbackSources(cleanProduct, braveSources);
     const externalSummarySources = uniqueLinks(fallbackSources);
     const externalReviewLinks = uniqueLinks(
@@ -1037,16 +1068,40 @@ export async function POST(request: NextRequest) {
             category: correctedCategory,
           })
         : enrichedProduct.image_url;
+    const safeIdentityApply =
+      !originalProduct.identity_approved_at && categoryConfidence >= 0.75;
+    const safeSpecsApply =
+      !originalProduct.specs_approved_at && specsConfidence >= 0.55;
+    const safeImageApply =
+      !originalProduct.image_approved_at &&
+      imageUrl &&
+      !isPlaceholderImage(imageUrl);
+    const nextSpecs = safeSpecsApply ? specs : originalProduct.specs || specs;
+    const warnings = Array.from(
+      new Set([
+        ...taxonomy.warnings,
+        ...(safeSpecsApply ? [] : ["Specs saved as suggestions pending review."]),
+      ])
+    );
 
     const { error: updateError } = await supabase
       .from("products")
       .update({
-        brand: enrichedProduct.brand,
-        category: correctedCategory,
-        image_url: imageUrl,
+        brand: safeIdentityApply ? enrichedProduct.brand : originalProduct.brand,
+        category: safeIdentityApply ? taxonomy.category : originalProduct.category,
+        image_url: safeImageApply ? imageUrl : originalProduct.image_url,
         description,
         ai_summary: aiSummary,
-        specs,
+        specs: nextSpecs,
+        suggested_title: enrichedProduct.name,
+        suggested_brand: enrichedProduct.brand,
+        suggested_category: taxonomy.category,
+        suggested_product_type: productType,
+        suggested_short_summary: aiSummary,
+        suggested_specs: specs,
+        suggested_image_url: imageUrl,
+        enrichment_warnings: warnings,
+        enrichment_sources: externalSummarySources,
         external_summary:
           "External source snippets were used to extract the product details and source links below.",
         common_praise: [],
@@ -1058,6 +1113,9 @@ export async function POST(request: NextRequest) {
         external_review_links: externalReviewLinks,
         external_summary_updated_at: new Date().toISOString(),
         enrichment_status: "snippet_enriched",
+        category_confidence: categoryConfidence,
+        specs_confidence: specsConfidence,
+        enrichment_confidence: Math.max(categoryConfidence, specsConfidence),
       })
       .eq("id", productId);
 

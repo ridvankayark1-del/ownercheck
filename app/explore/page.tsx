@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { ProductImage } from "@/components/ProductImage";
+import { ProductSearch } from "@/components/ProductSearch";
+import { normalizeProductText } from "@/lib/productNormalization";
 import { supabase } from "@/lib/supabaseClient";
 
 type Product = {
@@ -13,6 +15,11 @@ type Product = {
   category: string | null;
   image_url: string | null;
   description: string | null;
+  canonical_title: string | null;
+  normalized_title: string | null;
+  normalized_brand: string | null;
+  normalized_model: string | null;
+  aliases: string[] | null;
   product_verification_status: string | null;
   enrichment_status: string | null;
   created_at: string;
@@ -20,19 +27,28 @@ type Product = {
 
 type OwnedProduct = {
   product_id: string;
+  verification_status: string;
 };
 
 type Question = {
   product_id: string;
+  status: string;
+  answered_at: string | null;
 };
 
-type SortOption = "newest" | "az" | "most_owners" | "most_questions";
+type SortOption =
+  | "newest"
+  | "az"
+  | "most_owners"
+  | "most_answers"
+  | "recently_answered";
 
 function getProductVerificationLabel(status?: string | null) {
   if (status === "catalog_verified") return "Catalog verified";
-  if (status === "needs_review") return "Needs review";
-  if (status === "rejected") return "Rejected";
-  return "User-submitted";
+  if (status === "community_created" || status === "pending_enrichment") {
+    return "Community-created";
+  }
+  return "Info being verified";
 }
 
 export default function ExplorePage() {
@@ -42,14 +58,18 @@ export default function ExplorePage() {
 
   const [searchText, setSearchText] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("All");
-  const [verificationFilter, setVerificationFilter] = useState("All");
-  const [enrichmentFilter, setEnrichmentFilter] = useState("All");
+  const [signalFilter, setSignalFilter] = useState("All");
   const [sortBy, setSortBy] = useState<SortOption>("newest");
 
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState("");
 
   useEffect(() => {
+    const initialQuery = new URLSearchParams(window.location.search).get("q");
+    if (initialQuery) {
+      setSearchText(initialQuery);
+    }
+
     async function loadExploreData() {
       setLoading(true);
       setErrorMessage("");
@@ -57,7 +77,7 @@ export default function ExplorePage() {
       const { data: productsData, error: productsError } = await supabase
         .from("products")
         .select(
-          "id, slug, name, brand, category, image_url, description, product_verification_status, enrichment_status, created_at"
+          "id, slug, name, brand, category, image_url, description, canonical_title, normalized_title, normalized_brand, normalized_model, aliases, product_verification_status, enrichment_status, created_at"
         )
         .order("created_at", { ascending: false });
 
@@ -70,11 +90,11 @@ export default function ExplorePage() {
 
       const { data: ownedProductsData } = await supabase
         .from("owned_products")
-        .select("product_id");
+        .select("product_id, verification_status");
 
       const { data: questionsData } = await supabase
         .from("questions")
-        .select("product_id");
+        .select("product_id, status, answered_at");
 
       setProducts((productsData as Product[]) || []);
       setOwnedProducts((ownedProductsData as OwnedProduct[]) || []);
@@ -101,7 +121,13 @@ export default function ExplorePage() {
     const counts = new Map<string, number>();
 
     ownedProducts.forEach((item) => {
-      counts.set(item.product_id, (counts.get(item.product_id) || 0) + 1);
+      if (
+        ["photo_verified", "receipt_verified", "trusted_owner"].includes(
+          item.verification_status
+        )
+      ) {
+        counts.set(item.product_id, (counts.get(item.product_id) || 0) + 1);
+      }
     });
 
     return counts;
@@ -117,36 +143,76 @@ export default function ExplorePage() {
     return counts;
   }, [questions]);
 
+  const answerCountsByProductId = useMemo(() => {
+    const counts = new Map<string, number>();
+
+    questions.forEach((item) => {
+      if (item.status === "answered") {
+        counts.set(item.product_id, (counts.get(item.product_id) || 0) + 1);
+      }
+    });
+
+    return counts;
+  }, [questions]);
+
+  const latestAnswerByProductId = useMemo(() => {
+    const dates = new Map<string, number>();
+
+    questions.forEach((item) => {
+      if (!item.answered_at) return;
+      const time = new Date(item.answered_at).getTime();
+      dates.set(item.product_id, Math.max(dates.get(item.product_id) || 0, time));
+    });
+
+    return dates;
+  }, [questions]);
+
   const filteredProducts = useMemo(() => {
-    const cleanSearch = searchText.trim().toLowerCase();
+    const cleanSearch = normalizeProductText(searchText);
 
     const matchesFilters = products.filter((product) => {
+      const haystack = normalizeProductText(
+        [
+          product.name,
+          product.canonical_title,
+          product.brand,
+          product.category,
+          product.description,
+          product.normalized_title,
+          product.normalized_brand,
+          product.normalized_model,
+          ...(Array.isArray(product.aliases) ? product.aliases : []),
+        ]
+          .filter(Boolean)
+          .join(" ")
+      );
       const matchesSearch =
-        !cleanSearch ||
-        product.name.toLowerCase().includes(cleanSearch) ||
-        product.brand?.toLowerCase().includes(cleanSearch) ||
-        product.category?.toLowerCase().includes(cleanSearch) ||
-        product.description?.toLowerCase().includes(cleanSearch);
+        !cleanSearch || haystack.includes(cleanSearch);
 
       const matchesCategory =
         categoryFilter === "All" || product.category === categoryFilter;
 
-      const matchesVerification =
-        verificationFilter === "All" ||
-        product.product_verification_status === verificationFilter;
-      const matchesEnrichment =
-        enrichmentFilter === "All" ||
-        (enrichmentFilter === "enriched" &&
-          ["enriched", "snippet_enriched"].includes(
-            product.enrichment_status || ""
+      const ownerCount = ownerCountsByProductId.get(product.id) || 0;
+      const questionCount = questionCountsByProductId.get(product.id) || 0;
+      const answerCount = answerCountsByProductId.get(product.id) || 0;
+      const matchesSignal =
+        signalFilter === "All" ||
+        (signalFilter === "has_verified_owners" && ownerCount > 0) ||
+        (signalFilter === "has_answered_questions" && answerCount > 0) ||
+        (signalFilter === "private_chat_available" && ownerCount > 0) ||
+        (signalFilter === "catalog_verified" &&
+          product.product_verification_status === "catalog_verified") ||
+        (signalFilter === "community_created" &&
+          ["community_created", "pending_enrichment", "user_submitted"].includes(
+            product.product_verification_status || ""
           )) ||
-        product.enrichment_status === enrichmentFilter;
+        (signalFilter === "needs_first_owner" && ownerCount === 0) ||
+        (signalFilter === "has_public_questions" && questionCount > 0);
 
       return (
         matchesSearch &&
         matchesCategory &&
-        matchesVerification &&
-        matchesEnrichment
+        matchesSignal
       );
     });
 
@@ -163,12 +229,20 @@ export default function ExplorePage() {
         if (ownerDifference !== 0) return ownerDifference;
       }
 
-      if (sortBy === "most_questions") {
+      if (sortBy === "most_answers") {
         const questionDifference =
-          (questionCountsByProductId.get(secondProduct.id) || 0) -
-          (questionCountsByProductId.get(firstProduct.id) || 0);
+          (answerCountsByProductId.get(secondProduct.id) || 0) -
+          (answerCountsByProductId.get(firstProduct.id) || 0);
 
         if (questionDifference !== 0) return questionDifference;
+      }
+
+      if (sortBy === "recently_answered") {
+        const answerDifference =
+          (latestAnswerByProductId.get(secondProduct.id) || 0) -
+          (latestAnswerByProductId.get(firstProduct.id) || 0);
+
+        if (answerDifference !== 0) return answerDifference;
       }
 
       return (
@@ -180,9 +254,10 @@ export default function ExplorePage() {
     products,
     searchText,
     categoryFilter,
-    verificationFilter,
-    enrichmentFilter,
+    signalFilter,
     sortBy,
+    answerCountsByProductId,
+    latestAnswerByProductId,
     ownerCountsByProductId,
     questionCountsByProductId,
   ]);
@@ -193,6 +268,18 @@ export default function ExplorePage() {
 
   function getQuestionCount(productId: string) {
     return questionCountsByProductId.get(productId) || 0;
+  }
+
+  function getAnswerCount(productId: string) {
+    return answerCountsByProductId.get(productId) || 0;
+  }
+
+  function handleSearch(query: string) {
+    setSearchText(query);
+    const target = query
+      ? `/explore?q=${encodeURIComponent(query)}`
+      : "/explore";
+    window.history.pushState(null, "", target);
   }
 
   if (loading) {
@@ -213,9 +300,18 @@ export default function ExplorePage() {
           Find products and ask real owners
         </h1>
         <p className="mt-3 max-w-2xl text-muted">
-          Search the catalog, filter by category, and open product pages to ask
-          real owners before buying.
+          Search the catalog first. If no match is right, submit a missing
+          product and OwnerCheck will check for duplicates before publishing.
         </p>
+
+        <div className="mt-6 max-w-3xl">
+          <ProductSearch
+            initialQuery={searchText}
+            onSearch={handleSearch}
+            placeholder="Search for AirPods, Canon R5, Louis Vuitton Neverfull..."
+            buttonLabel="Search"
+          />
+        </div>
 
         {errorMessage && (
           <p className="mt-4 rounded-2xl bg-red-50 p-4 text-sm font-bold text-red-700">
@@ -225,17 +321,7 @@ export default function ExplorePage() {
       </section>
 
       <section className="card mb-8 p-5">
-        <div className="grid gap-4 md:grid-cols-[1fr_160px_200px_180px_160px]">
-          <div>
-            <label className="label">Search</label>
-            <input
-              className="input mt-2"
-              value={searchText}
-              onChange={(event) => setSearchText(event.target.value)}
-              placeholder="Search headphones, cameras, microphones..."
-            />
-          </div>
-
+        <div className="grid gap-4 md:grid-cols-[160px_240px_180px]">
           <div>
             <label className="label">Category</label>
             <select
@@ -250,31 +336,20 @@ export default function ExplorePage() {
           </div>
 
           <div>
-            <label className="label">Verification</label>
+            <label className="label">Buyer signals</label>
             <select
               className="input mt-2"
-              value={verificationFilter}
-              onChange={(event) => setVerificationFilter(event.target.value)}
+              value={signalFilter}
+              onChange={(event) => setSignalFilter(event.target.value)}
             >
               <option value="All">All</option>
+              <option value="has_verified_owners">Has verified owners</option>
+              <option value="has_answered_questions">Has answered questions</option>
+              <option value="private_chat_available">Available for private chat</option>
               <option value="catalog_verified">Catalog verified</option>
-              <option value="user_submitted">User-submitted</option>
-              <option value="needs_review">Needs review</option>
-              <option value="rejected">Rejected</option>
-            </select>
-          </div>
-
-          <div>
-            <label className="label">Enrichment</label>
-            <select
-              className="input mt-2"
-              value={enrichmentFilter}
-              onChange={(event) => setEnrichmentFilter(event.target.value)}
-            >
-              <option value="All">All</option>
-              <option value="not_enriched">Not enriched</option>
-              <option value="enriched">Enriched</option>
-              <option value="failed">Failed</option>
+              <option value="community_created">Community-created</option>
+              <option value="needs_first_owner">Needs first owner</option>
+              <option value="has_public_questions">Has public questions</option>
             </select>
           </div>
 
@@ -288,7 +363,8 @@ export default function ExplorePage() {
               <option value="newest">Newest</option>
               <option value="az">A-Z</option>
               <option value="most_owners">Most owners</option>
-              <option value="most_questions">Most questions</option>
+              <option value="most_answers">Most owner answers</option>
+              <option value="recently_answered">Recently answered</option>
             </select>
           </div>
         </div>
@@ -302,17 +378,41 @@ export default function ExplorePage() {
         <section className="card p-6">
           <h2 className="text-2xl font-black">No products found</h2>
           <p className="mt-3 text-muted">
-            Try changing the search or filters, or create a new product page.
+            Can't find this product? Submit it to OwnerCheck. We'll check for
+            duplicates, add basic info, and review it.
           </p>
-          <Link href="/add-product" className="btn btn-dark mt-5">
-            Add product
+          <Link
+            href={`/add-product${searchText ? `?q=${encodeURIComponent(searchText)}` : ""}`}
+            className="btn btn-dark mt-5"
+          >
+            Submit it to OwnerCheck
           </Link>
         </section>
       ) : (
-        <section className="grid gap-5 md:grid-cols-2 lg:grid-cols-3">
-          {filteredProducts.map((product) => {
+        <>
+          {searchText.trim() && (
+            <section className="card mb-6 p-5">
+              <h2 className="text-2xl font-black">
+                Can't find this product?
+              </h2>
+              <p className="mt-2 text-muted">
+                If none of these matches are correct, submit it to OwnerCheck.
+                We'll check for duplicates, add basic info, and review it.
+              </p>
+              <Link
+                href={`/add-product?q=${encodeURIComponent(searchText)}`}
+                className="btn btn-dark mt-4"
+              >
+                Submit it to OwnerCheck
+              </Link>
+            </section>
+          )}
+
+          <section className="grid gap-5 md:grid-cols-2 lg:grid-cols-3">
+            {filteredProducts.map((product) => {
             const ownerCount = getOwnerCount(product.id);
             const questionCount = getQuestionCount(product.id);
+            const answerCount = getAnswerCount(product.id);
 
             return (
               <div
@@ -345,18 +445,15 @@ export default function ExplorePage() {
                     </span>
 
                     <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
-                      {ownerCount} owners
+                      {ownerCount} verified owners
                     </span>
 
                     <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
-                      {questionCount} questions
+                      {answerCount} owner answers
                     </span>
-
-                    {product.enrichment_status && (
-                      <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
-                        {product.enrichment_status.replace(/_/g, " ")}
-                      </span>
-                    )}
+                    <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
+                      {questionCount} public questions
+                    </span>
                   </div>
 
                   <div className="mt-5 flex flex-wrap gap-3">
@@ -376,8 +473,9 @@ export default function ExplorePage() {
                 </div>
               </div>
             );
-          })}
-        </section>
+            })}
+          </section>
+        </>
       )}
     </main>
   );

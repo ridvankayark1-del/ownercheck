@@ -111,7 +111,7 @@ export const CATEGORY_PROFILES: CategoryProfile[] = [
     ],
     productTypeRules: [
       { keywords: ["gaming headset"], productType: "Gaming headset" },
-      { keywords: ["earbuds", "earbud", "in-ear", "airpods pro"], productType: "Wireless earbuds" },
+      { keywords: ["earbuds", "earbud", "in-ear", "airpods"], productType: "Wireless earbuds" },
       { keywords: ["wired", "studio monitoring", "dt 770"], productType: "Wired studio headphones" },
       { keywords: ["noise-cancelling", "noise cancelling", "anc"], productType: "Noise-cancelling headphones" },
       { keywords: ["over-ear", "over ear", "airpods max", "quietcomfort", "momentum wireless", "wh-1000xm"], productType: "Wireless over-ear headphones" },

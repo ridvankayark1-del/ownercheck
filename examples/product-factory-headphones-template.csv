@@ -1,0 +1,6 @@
+source_name,source_url,brand,name,category,product_type,image_url_candidate,spec:type,spec:enclosure,spec:wireless,spec:transducer,spec:noise_cancelling,spec:mic
+RTINGS,https://www.rtings.com/headphones/reviews/apple/airpods-3rd-generation-truly-wireless,Apple,AirPods (3rd generation),Headphones,True wireless earbuds,,Earbuds,Open-Back,Yes,Dynamic,No,Yes
+RTINGS,https://www.rtings.com/headphones/reviews/sony/wh-1000xm5-wireless,Sony,WH-1000XM5,Headphones,Noise-cancelling headphones,,Over-ear,Closed-Back,Yes,Dynamic,Yes,Yes
+RTINGS,https://www.rtings.com/headphones/reviews/bose/quietcomfort-ultra-headphones-wireless,Bose,QuietComfort Ultra Headphones,Headphones,Noise-cancelling headphones,,Over-ear,Closed-Back,Yes,Dynamic,Yes,Yes
+RTINGS,https://www.rtings.com/headphones/reviews/sennheiser/momentum-4-wireless,Sennheiser,Momentum 4 Wireless,Headphones,Over-ear headphones,,Over-ear,Closed-Back,Yes,Dynamic,Yes,Yes
+RTINGS,https://www.rtings.com/headphones/reviews/audeze/lcd-2-classic,Audeze,LCD-2 Classic,Headphones,Over-ear headphones,,Over-ear,Open-Back,No,Planar Magnetic,No,No

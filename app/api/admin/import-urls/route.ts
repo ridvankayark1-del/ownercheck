@@ -4,6 +4,10 @@ import {
   requireDatabaseAdmin,
 } from "@/lib/adminAuth";
 import { findProductImage } from "@/lib/productImages";
+import {
+  buildProductIdentity,
+  findDuplicateProducts,
+} from "@/lib/productNormalization";
 
 type SupabaseClient = ReturnType<typeof createAuthorizedSupabaseClient>;
 
@@ -145,6 +149,24 @@ export async function POST(request: NextRequest) {
         }
 
         const inferred = inferProductFromUrl(sourceUrl, category || "Other");
+        const duplicateCandidates = await findDuplicateProducts(
+          supabase,
+          inferred
+        );
+        const exactDuplicate = duplicateCandidates.find(
+          (candidate) => candidate.matchType === "exact"
+        );
+
+        if (exactDuplicate) {
+          rows.push({
+            url,
+            status: "skipped",
+            message: `Exact duplicate of ${exactDuplicate.name}.`,
+            slug: exactDuplicate.slug,
+          });
+          continue;
+        }
+
         const slug = await createUniqueSlug(
           supabase,
           slugify(`${inferred.brand ? `${inferred.brand} ` : ""}${inferred.name}`)
@@ -154,6 +176,7 @@ export async function POST(request: NextRequest) {
           inferred.brand,
           inferred.category
         );
+        const identity = buildProductIdentity(inferred);
         const imageUrl = await findProductImage({
           sourceUrl,
           category: inferred.category,
@@ -165,7 +188,35 @@ export async function POST(request: NextRequest) {
           brand: inferred.brand,
           category: inferred.category,
           image_url: imageUrl,
+          product_url: sourceUrl,
           source_url: sourceUrl,
+          normalized_title: identity.normalizedTitle,
+          normalized_brand: identity.normalizedBrand || null,
+          normalized_model: identity.normalizedModel || null,
+          canonical_slug: identity.canonicalSlug,
+          aliases: identity.aliases,
+          canonical_title: inferred.name,
+          product_type: inferred.category,
+          short_summary: copy.ai_summary,
+          key_specs: {},
+          main_features: [],
+          best_for: ["Real-owner buying advice"],
+          common_buyer_concerns: [],
+          source_urls: [{ title: "Admin import source", url: sourceUrl }],
+          main_image_url: imageUrl,
+          image_source_url: imageUrl ? "admin_url_import" : null,
+          image_candidates: imageUrl
+            ? [
+                {
+                  url: imageUrl,
+                  source_url: sourceUrl,
+                  source_type: "submitted",
+                  score: 0.6,
+                },
+              ]
+            : [],
+          image_confidence: imageUrl ? 0.6 : null,
+          enrichment_confidence: 0.5,
           product_verification_status: "catalog_verified",
           verified_source: "admin_import_source_url",
           enrichment_status: "not_enriched",
@@ -177,7 +228,15 @@ export async function POST(request: NextRequest) {
         if (insertError) {
           rows.push({ url, status: "failed", message: insertError.message });
         } else {
-          rows.push({ url, status: "created", message: "Imported.", slug });
+          rows.push({
+            url,
+            status: "created",
+            message:
+              duplicateCandidates.length > 0
+                ? "Imported with possible duplicate matches for admin review."
+                : "Imported.",
+            slug,
+          });
         }
       } catch (error) {
         rows.push({

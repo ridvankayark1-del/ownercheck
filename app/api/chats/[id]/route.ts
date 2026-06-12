@@ -45,7 +45,7 @@ export async function GET(request: NextRequest, context: RouteContext) {
     const { data: chat, error: chatError } = await supabase
       .from("chats")
       .select(
-        "id, direct_question_id, product_id, buyer_id, owner_id, status, created_at, updated_at, products(slug, name, brand), direct_questions!chats_direct_question_id_fkey(question_text, status)"
+        "id, direct_question_id, product_id, buyer_id, owner_id, status, created_at, updated_at, products(slug, name, brand, category, image_url), direct_questions!chats_direct_question_id_fkey(question_text, status)"
       )
       .eq("id", id)
       .single();

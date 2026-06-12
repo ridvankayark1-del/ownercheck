@@ -4,66 +4,422 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { ProductImage } from "@/components/ProductImage";
 import { checkCurrentUserIsAdmin } from "@/lib/adminClient";
-import { isPlaceholderImage } from "@/lib/productImages";
 import { normalizeCategory } from "@/lib/productCategoryProfiles";
+import { isPlaceholderImage } from "@/lib/productImages";
+import {
+  normalizeProductText,
+  scoreProductMatch,
+} from "@/lib/productNormalization";
+import { getCategorySpecKeys } from "@/lib/productTaxonomy";
 import { supabase } from "@/lib/supabaseClient";
 
 type Product = {
   id: string;
   slug: string;
   name: string;
+  model: string | null;
   brand: string | null;
   category: string | null;
-  specs: {
+  specs: Record<string, unknown> & {
     product_type?: string | null;
-    category?: string | null;
-    [key: string]: unknown;
+    _items?: Array<Record<string, unknown>>;
   } | null;
   image_url: string | null;
   product_verification_status: string | null;
   source_url: string | null;
+  product_url: string | null;
   verified_source: string | null;
   external_summary: string | null;
   enrichment_status: string | null;
+  suggested_title: string | null;
+  suggested_brand: string | null;
+  suggested_model: string | null;
+  suggested_category: string | null;
+  suggested_product_type: string | null;
+  suggested_short_summary: string | null;
+  suggested_specs: Record<string, unknown> | null;
+  suggested_image_url: string | null;
+  enrichment_warnings: string[] | null;
+  enrichment_sources: Array<{ title?: string; url?: string }> | null;
+  category_confidence: number | null;
+  specs_confidence: number | null;
+  identity_approved_at: string | null;
+  specs_approved_at: string | null;
+  image_approved_at: string | null;
+  duplicate_reviewed_at: string | null;
   created_at: string;
+};
+
+type SpecDraftRow = {
+  key: string;
+  label: string;
+  value: string;
+  source_url: string;
+  confidence: string;
+  source_type: string;
+  status: "approved" | "needs_review" | "";
 };
 
 type ProductStatus =
   | "catalog_verified"
+  | "community_created"
   | "user_submitted"
+  | "pending_enrichment"
   | "needs_review"
   | "rejected";
+
+type QueueView =
+  | "needs_attention"
+  | "ready_to_verify"
+  | "possible_duplicates"
+  | "missing_specs"
+  | "missing_images"
+  | "needs_identity"
+  | "recently_imported"
+  | "catalog_verified"
+  | "rejected"
+  | "all";
+
+type ReviewTab =
+  | "overview"
+  | "identity"
+  | "specs"
+  | "image"
+  | "duplicate"
+  | "enrichment"
+  | "status";
+
+type DuplicateCandidateView = {
+  product: Product;
+  score: number;
+  reasons: string[];
+};
+
+const QUEUE_VIEWS: Array<{ id: QueueView; label: string }> = [
+  { id: "needs_attention", label: "Needs attention" },
+  { id: "ready_to_verify", label: "Ready to verify" },
+  { id: "possible_duplicates", label: "Possible duplicates" },
+  { id: "missing_specs", label: "Missing specs" },
+  { id: "missing_images", label: "Missing images" },
+  { id: "needs_identity", label: "Needs identity review" },
+  { id: "recently_imported", label: "Recently imported" },
+  { id: "catalog_verified", label: "Catalog verified" },
+  { id: "rejected", label: "Rejected" },
+  { id: "all", label: "All products" },
+];
+
+function formatStatus(value?: string | null) {
+  return (value || "not set").replace(/_/g, " ");
+}
+
+function chipClass(tone: "good" | "warn" | "bad" | "neutral" = "neutral") {
+  if (tone === "good") return "bg-emerald-100 text-emerald-800";
+  if (tone === "warn") return "bg-amber-100 text-amber-800";
+  if (tone === "bad") return "bg-red-100 text-red-800";
+  return "bg-slate-100 text-slate-700";
+}
 
 function getImageStatus(product: Product) {
   if (!product.image_url) return "missing";
   if (isPlaceholderImage(product.image_url)) return "placeholder";
-  return "has_image";
+  if (!product.image_approved_at) return "needs_approval";
+  return "approved";
 }
 
-function getImageStatusLabel(status: string) {
-  if (status === "has_image") return "Has image";
+function getImageStatusLabel(product: Product) {
+  const status = getImageStatus(product);
+  if (status === "approved") return "Image approved";
+  if (status === "needs_approval") return "Image found, needs approval";
   if (status === "placeholder") return "Placeholder image";
-  return "Missing image";
+  return "Image missing";
 }
 
-function getBadgeClass(value?: string | null) {
-  if (value === "catalog_verified" || value === "snippet_enriched" || value === "enriched") {
-    return "bg-emerald-100 text-emerald-800";
-  }
-
-  if (value === "needs_review" || value === "placeholder") {
-    return "bg-amber-100 text-amber-800";
-  }
-
-  if (value === "failed" || value === "rejected" || value === "missing") {
-    return "bg-red-100 text-red-800";
-  }
-
-  return "bg-slate-100 text-slate-700";
+function formatEnrichmentStatus(value?: string | null) {
+  if (value === "snippet_enriched") return "Enrichment source: Search snippets";
+  if (value === "source_enriched") return "Enrichment source: Source URL";
+  if (value === "pending_review") return "Enrichment needs review";
+  if (value === "failed") return "Enrichment failed";
+  if (!value || value === "not_enriched") return "Not enriched";
+  return formatStatus(value);
 }
 
-function formatStatus(value?: string | null) {
-  return (value || "not_enriched").replace(/_/g, " ");
+function formatSpecLabel(value: string) {
+  return value
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function getSpecRows(product: Product): SpecDraftRow[] {
+  const specs = product.specs || {};
+  const itemRows = Array.isArray(specs._items)
+    ? specs._items.map((item) => ({
+        key: String(item.key || ""),
+        label: String(item.label || item.key || ""),
+        value: String(item.value || ""),
+        source_url: String(item.source_url || ""),
+        confidence:
+          typeof item.confidence === "number" ? String(item.confidence) : "",
+        source_type: String(item.source_type || ""),
+        status:
+          item.status === "approved" || item.status === "needs_review"
+            ? item.status
+            : ("" as SpecDraftRow["status"]),
+      }))
+    : [];
+
+  if (itemRows.length > 0) return itemRows;
+
+  const reserved = new Set([
+    "brand",
+    "category",
+    "product_type",
+    "model",
+    "main_features",
+    "best_for",
+    "check_before_buying",
+    "_items",
+  ]);
+  const keys = Array.from(
+    new Set([
+      "product_type",
+      ...Object.keys(specs).filter((key) => !reserved.has(key)),
+    ])
+  );
+
+  return keys
+    .map((key) => ({
+      key,
+      label: formatSpecLabel(key),
+      value:
+        key === "product_type"
+          ? String(specs.product_type || "")
+          : typeof specs[key] === "string"
+            ? String(specs[key])
+            : "",
+      source_url: "",
+      confidence: "",
+      source_type: "",
+      status: "" as SpecDraftRow["status"],
+    }))
+    .filter((row) => row.key || row.value);
+}
+
+function rowsToSpecs(product: Product, rows: SpecDraftRow[]) {
+  const specs: Record<string, unknown> = {
+    ...(product.specs || {}),
+    category: product.category,
+  };
+  const cleanRows = rows
+    .map((row) => ({
+      ...row,
+      key: row.key.trim(),
+      label: row.label.trim() || formatSpecLabel(row.key),
+      value: row.value.trim(),
+      source_url: row.source_url.trim(),
+      source_type: row.source_type.trim(),
+      confidence: row.confidence.trim(),
+    }))
+    .filter((row) => row.key && row.value);
+
+  cleanRows.forEach((row) => {
+    specs[row.key] = row.value;
+  });
+  specs._items = cleanRows.map((row) => ({
+    key: row.key,
+    label: row.label,
+    value: row.value,
+    source_url: row.source_url || null,
+    source_type: row.source_type || null,
+    confidence: row.confidence ? Number(row.confidence) : null,
+    status: row.status || "needs_review",
+  }));
+
+  return specs;
+}
+
+function getDuplicateCandidates(
+  product: Product,
+  products: Product[],
+  manualSearch = ""
+): DuplicateCandidateView[] {
+  const searchText = manualSearch.trim();
+
+  return products
+    .filter((candidate) => candidate.id !== product.id)
+    .map((candidate) => {
+      const reasons: string[] = [];
+      const score = scoreProductMatch(
+        {
+          name: searchText || product.name,
+          brand: product.brand,
+          model: product.model,
+          category: product.category,
+        },
+        {
+          name: candidate.name,
+          brand: candidate.brand,
+          model: candidate.model,
+          category: candidate.category,
+        }
+      );
+      const productTitle = normalizeProductText(product.name);
+      const candidateTitle = normalizeProductText(candidate.name);
+      const productBrand = normalizeProductText(product.brand);
+      const candidateBrand = normalizeProductText(candidate.brand);
+      const productModel = normalizeProductText(product.model);
+      const candidateModel = normalizeProductText(candidate.model);
+      const productCategory = normalizeProductText(product.category);
+      const candidateCategory = normalizeProductText(candidate.category);
+      const haystack = normalizeProductText(
+        [candidate.name, candidate.brand, candidate.category, candidate.model]
+          .filter(Boolean)
+          .join(" ")
+      );
+
+      if (productBrand && productBrand === candidateBrand) reasons.push("same brand");
+      if (productCategory && productCategory === candidateCategory) {
+        reasons.push("same category");
+      }
+      if (productModel && productModel === candidateModel) reasons.push("same model");
+      if (productTitle && candidateTitle.includes(productTitle)) {
+        reasons.push("similar title");
+      } else if (candidateTitle && productTitle.includes(candidateTitle)) {
+        reasons.push("similar title");
+      }
+      if (searchText && haystack.includes(normalizeProductText(searchText))) {
+        reasons.push("manual search match");
+      }
+
+      return { product: candidate, score, reasons };
+    })
+    .filter((candidate) => candidate.score >= 0.35 || candidate.reasons.length >= 2)
+    .sort((first, second) => second.score - first.score)
+    .slice(0, 5);
+}
+
+function getDuplicateRisk(candidates: DuplicateCandidateView[]) {
+  const topScore = candidates[0]?.score || 0;
+  if (topScore >= 0.8) return "High";
+  if (topScore >= 0.55 || candidates.length >= 3) return "Medium";
+  return "Low";
+}
+
+function isCatalogReady(product: Product) {
+  return Boolean(
+    product.identity_approved_at &&
+      product.specs_approved_at &&
+      product.image_approved_at &&
+      product.duplicate_reviewed_at &&
+      product.product_verification_status !== "rejected"
+  );
+}
+
+function getMissingRecommendedSpecs(product: Product, rows: SpecDraftRow[]) {
+  return getCategorySpecKeys(product.category).filter(
+    (key) => !rows.some((row) => row.key === key && row.value.trim())
+  );
+}
+
+function getSpecSourceSummary(product: Product, rows: SpecDraftRow[]) {
+  const filledRows = rows.filter((row) => row.value.trim());
+  const sources = Array.from(
+    new Set(
+      filledRows
+        .map((row) => row.source_type || row.source_url)
+        .filter(Boolean)
+    )
+  );
+  const sourceUrls = Array.from(
+    new Set(filledRows.map((row) => row.source_url).filter(Boolean))
+  );
+  const lowConfidenceCount = filledRows.filter((row) => {
+    const confidence = Number(row.confidence);
+    return row.confidence && !Number.isNaN(confidence) && confidence < 0.6;
+  }).length;
+  const unreviewedCount = filledRows.filter((row) => row.status !== "approved").length;
+
+  return {
+    filledCount: filledRows.length,
+    sourceLabel:
+      sources[0] ||
+      (product.source_url ? "product source URL" : "No spec source recorded"),
+    hasMixedSources: sourceUrls.length > 1,
+    lowConfidenceCount,
+    unreviewedCount,
+    shouldShowAdvanced: lowConfidenceCount > 0 || sourceUrls.length > 1,
+  };
+}
+
+function getIssueChips(product: Product, candidates: DuplicateCandidateView[]) {
+  if (product.product_verification_status === "rejected") {
+    return [{ label: "Rejected", tone: "bad" as const }];
+  }
+
+  if (
+    product.product_verification_status === "catalog_verified" &&
+    isCatalogReady(product)
+  ) {
+    return [{ label: "Catalog verified", tone: "good" as const }];
+  }
+
+  const chips: Array<{ label: string; tone: "good" | "warn" | "bad" | "neutral" }> = [];
+  const duplicateRisk = getDuplicateRisk(candidates);
+
+  if (duplicateRisk !== "Low" && !product.duplicate_reviewed_at) {
+    chips.push({ label: "Possible duplicate", tone: "warn" });
+  }
+  if (!product.identity_approved_at || (product.category_confidence || 0) < 0.5) {
+    chips.push({ label: "Identity needed", tone: "warn" });
+  }
+  if (!product.specs_approved_at || getSpecRows(product).length === 0) {
+    chips.push({ label: "Specs needed", tone: "warn" });
+  }
+  if (!product.image_approved_at) {
+    chips.push({
+      label: product.image_url ? "Image approval needed" : "Image missing",
+      tone: product.image_url ? "warn" : "bad",
+    });
+  }
+  if (!product.duplicate_reviewed_at) {
+    chips.push({ label: "Duplicate check needed", tone: "warn" });
+  }
+  if ((product.specs_confidence || 0) < 0.5 || product.enrichment_warnings?.length) {
+    chips.push({ label: "Low-confidence enrichment", tone: "warn" });
+  }
+  if (!product.source_url && !product.product_url) {
+    chips.push({ label: "Missing source", tone: "neutral" });
+  }
+  if (chips.length === 0 && isCatalogReady(product)) {
+    chips.push({ label: "Ready to verify", tone: "good" });
+  }
+
+  return chips.slice(0, 4);
+}
+
+function getSuggestedAction(product: Product, candidates: DuplicateCandidateView[]) {
+  if (product.product_verification_status === "rejected") return "Review rejection";
+  if (getDuplicateRisk(candidates) !== "Low" && !product.duplicate_reviewed_at) {
+    return "Review duplicate candidates";
+  }
+  if (!product.identity_approved_at || (product.category_confidence || 0) < 0.5) {
+    return "Approve identity";
+  }
+  if (!product.specs_approved_at || getSpecRows(product).length === 0) {
+    return "Edit missing specs";
+  }
+  if (!product.image_approved_at) return "Review image";
+  if (!product.duplicate_reviewed_at) return "Approve duplicate check";
+  if (isCatalogReady(product)) return "Approve as Catalog verified";
+  return "Mark needs review";
+}
+
+function getReadyBlocker(product: Product) {
+  if (!product.identity_approved_at) return "Cannot verify yet: identity needs review";
+  if (!product.specs_approved_at) return "Cannot verify yet: specs need approval";
+  if (!product.image_approved_at) return "Cannot verify yet: image needs approval";
+  if (!product.duplicate_reviewed_at) return "Cannot verify yet: duplicate check missing";
+  if (product.product_verification_status === "rejected") return "Cannot verify rejected product";
+  return "";
 }
 
 export default function AdminProductsPage() {
@@ -71,30 +427,47 @@ export default function AdminProductsPage() {
   const [loggedIn, setLoggedIn] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [products, setProducts] = useState<Product[]>([]);
-  const [externalSummaryDrafts, setExternalSummaryDrafts] = useState<
-    Record<string, string>
-  >({});
-  const [manualDrafts, setManualDrafts] = useState<
-    Record<string, { category: string; productType: string }>
-  >({});
-  const [enrichingProductId, setEnrichingProductId] = useState("");
-  const [batchLoading, setBatchLoading] = useState(false);
   const [message, setMessage] = useState("");
-  const [pageLimit, setPageLimit] = useState(100);
-
+  const [pageLimit, setPageLimit] = useState(150);
   const [searchText, setSearchText] = useState("");
-  const [enrichmentFilter, setEnrichmentFilter] = useState("all");
-  const [verificationFilter, setVerificationFilter] = useState("all");
-  const [imageFilter, setImageFilter] = useState("all");
-  const [sourceFilter, setSourceFilter] = useState("all");
+  const [queueView, setQueueView] = useState<QueueView>("needs_attention");
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [categoryFilter, setCategoryFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
   const [sortOption, setSortOption] = useState("newest");
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [activeProductId, setActiveProductId] = useState("");
+  const [activeTab, setActiveTab] = useState<ReviewTab>("overview");
+  const [working, setWorking] = useState(false);
+  const [enrichingProductId, setEnrichingProductId] = useState("");
+  const [manualDrafts, setManualDrafts] = useState<
+    Record<string, { name: string; brand: string; model: string; category: string; productType: string }>
+  >({});
+  const [specDrafts, setSpecDrafts] = useState<Record<string, SpecDraftRow[]>>({});
+  const [imageDrafts, setImageDrafts] = useState<Record<string, string>>({});
+  const [sourceNoteDrafts, setSourceNoteDrafts] = useState<Record<string, string>>({});
+  const [duplicateSearches, setDuplicateSearches] = useState<Record<string, string>>({});
+
+  async function getAdminSessionToken() {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) throw new Error("You do not have admin access.");
+    const adminCheck = await checkCurrentUserIsAdmin();
+    if (!adminCheck.isAdmin) throw new Error("You do not have admin access.");
+
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+
+    if (!session?.access_token) throw new Error("Admin session is missing. Log in again.");
+    return session.access_token;
+  }
 
   async function loadProducts({ clearMessage = true } = {}) {
     setLoading(true);
-    if (clearMessage) {
-      setMessage("");
-    }
+    if (clearMessage) setMessage("");
 
     const {
       data: { user },
@@ -108,7 +481,6 @@ export default function AdminProductsPage() {
     }
 
     setLoggedIn(true);
-
     const adminCheck = await checkCurrentUserIsAdmin();
 
     if (!adminCheck.isAdmin) {
@@ -123,39 +495,46 @@ export default function AdminProductsPage() {
     const { data, error } = await supabase
       .from("products")
       .select(
-        "id, slug, name, brand, category, specs, image_url, product_verification_status, source_url, verified_source, external_summary, enrichment_status, created_at"
+        "id, slug, name, model, brand, category, specs, image_url, product_verification_status, source_url, product_url, verified_source, external_summary, enrichment_status, suggested_title, suggested_brand, suggested_model, suggested_category, suggested_product_type, suggested_short_summary, suggested_specs, suggested_image_url, enrichment_warnings, enrichment_sources, category_confidence, specs_confidence, identity_approved_at, specs_approved_at, image_approved_at, duplicate_reviewed_at, created_at"
       )
       .order("created_at", { ascending: false })
       .range(0, pageLimit - 1);
 
     if (error) {
-      setMessage(error.message);
       setProducts([]);
-      setExternalSummaryDrafts({});
-    } else {
-      const loadedProducts = (data as Product[]) || [];
-      setProducts(loadedProducts);
-      setExternalSummaryDrafts(
-        Object.fromEntries(
-          loadedProducts.map((product) => [
-            product.id,
-            product.external_summary || "",
-          ])
-        )
-      );
-      setManualDrafts(
-        Object.fromEntries(
-          loadedProducts.map((product) => [
-            product.id,
-            {
-              category: product.category || "",
-              productType: product.specs?.product_type || "",
-            },
-          ])
-        )
-      );
+      setMessage(error.message);
+      setLoading(false);
+      return;
     }
 
+    const loaded = (data as Product[]) || [];
+    setProducts(loaded);
+    setManualDrafts(
+      Object.fromEntries(
+        loaded.map((product) => [
+          product.id,
+          {
+            name: product.name || "",
+            brand: product.brand || "",
+            model: product.model || "",
+            category: product.category || "",
+            productType: product.specs?.product_type || "",
+          },
+        ])
+      )
+    );
+    setSpecDrafts(Object.fromEntries(loaded.map((product) => [product.id, getSpecRows(product)])));
+    setImageDrafts(
+      Object.fromEntries(
+        loaded.map((product) => [
+          product.id,
+          product.image_url || product.suggested_image_url || "",
+        ])
+      )
+    );
+    setSourceNoteDrafts(
+      Object.fromEntries(loaded.map((product) => [product.id, product.external_summary || ""]))
+    );
     setLoading(false);
   }
 
@@ -165,46 +544,68 @@ export default function AdminProductsPage() {
 
   const categories = useMemo(
     () =>
-      Array.from(
-        new Set(products.map((product) => product.category).filter(Boolean))
-      ).sort() as string[],
+      Array.from(new Set(products.map((product) => product.category).filter(Boolean))).sort() as string[],
     [products]
   );
 
-  const enrichmentStatuses = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          products.map((product) => product.enrichment_status || "not_enriched")
-        )
-      ).sort(),
-    [products]
-  );
+  const productMeta = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        duplicateCandidates: DuplicateCandidateView[];
+        duplicateRisk: string;
+        issueChips: ReturnType<typeof getIssueChips>;
+        suggestedAction: string;
+        specRows: SpecDraftRow[];
+        missingSpecs: string[];
+      }
+    >();
+
+    products.forEach((product) => {
+      const duplicateCandidates = getDuplicateCandidates(
+        product,
+        products,
+        duplicateSearches[product.id] || ""
+      );
+      const specRows = specDrafts[product.id] || getSpecRows(product);
+      map.set(product.id, {
+        duplicateCandidates,
+        duplicateRisk: getDuplicateRisk(duplicateCandidates),
+        issueChips: getIssueChips(product, duplicateCandidates),
+        suggestedAction: getSuggestedAction(product, duplicateCandidates),
+        specRows,
+        missingSpecs: getMissingRecommendedSpecs(product, specRows),
+      });
+    });
+
+    return map;
+  }, [duplicateSearches, products, specDrafts]);
 
   const counts = useMemo(() => {
-    return {
-      total: products.length,
-      enriched: products.filter((product) =>
-        ["enriched", "snippet_enriched"].includes(product.enrichment_status || "")
-      ).length,
-      notEnriched: products.filter(
-        (product) => (product.enrichment_status || "not_enriched") === "not_enriched"
-      ).length,
-      failed: products.filter((product) => product.enrichment_status === "failed")
-        .length,
-      missingImage: products.filter((product) => getImageStatus(product) === "missing")
-        .length,
-      placeholderImage: products.filter(
-        (product) => getImageStatus(product) === "placeholder"
-      ).length,
-      needsReview: products.filter(
-        (product) => product.product_verification_status === "needs_review"
-      ).length,
-      catalogVerified: products.filter(
-        (product) => product.product_verification_status === "catalog_verified"
-      ).length,
-    };
-  }, [products]);
+    const inView = (view: QueueView) =>
+      products.filter((product) => productMatchesView(product, view)).length;
+
+    return Object.fromEntries(QUEUE_VIEWS.map((view) => [view.id, inView(view.id)]));
+  }, [productMeta, products]);
+
+  function productMatchesView(product: Product, view: QueueView) {
+    const meta = productMeta.get(product.id);
+    const duplicateRisk = meta?.duplicateRisk || "Low";
+    const specCount = meta?.specRows.length || 0;
+    const importedRecently =
+      new Date(product.created_at).getTime() > Date.now() - 1000 * 60 * 60 * 24 * 14;
+
+    if (view === "all") return true;
+    if (view === "catalog_verified") return product.product_verification_status === "catalog_verified";
+    if (view === "rejected") return product.product_verification_status === "rejected";
+    if (view === "ready_to_verify") return isCatalogReady(product) && product.product_verification_status !== "catalog_verified";
+    if (view === "possible_duplicates") return duplicateRisk !== "Low" && !product.duplicate_reviewed_at;
+    if (view === "missing_specs") return specCount === 0 || !product.specs_approved_at;
+    if (view === "missing_images") return !product.image_url || !product.image_approved_at || isPlaceholderImage(product.image_url);
+    if (view === "needs_identity") return !product.identity_approved_at || (product.category_confidence || 0) < 0.5;
+    if (view === "recently_imported") return importedRecently;
+    return product.product_verification_status !== "catalog_verified" && product.product_verification_status !== "rejected";
+  }
 
   const filteredProducts = useMemo(() => {
     const search = searchText.trim().toLowerCase();
@@ -212,330 +613,348 @@ export default function AdminProductsPage() {
       const haystack = [
         product.name,
         product.brand,
+        product.model,
         product.category,
         product.source_url,
+        product.product_url,
       ]
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
-      const enrichmentStatus = product.enrichment_status || "not_enriched";
-      const imageStatus = getImageStatus(product);
 
+      if (!productMatchesView(product, queueView)) return false;
       if (search && !haystack.includes(search)) return false;
-      if (
-        enrichmentFilter === "not_enriched" &&
-        enrichmentStatus !== "not_enriched"
-      ) {
-        return false;
-      }
-      if (
-        enrichmentFilter === "enriched" &&
-        !["enriched", "snippet_enriched"].includes(enrichmentStatus)
-      ) {
-        return false;
-      }
-      if (enrichmentFilter === "failed" && enrichmentStatus !== "failed") {
-        return false;
-      }
-      if (
-        enrichmentFilter === "needs_enrichment" &&
-        enrichmentStatus !== "not_enriched" &&
-        imageStatus !== "missing" &&
-        imageStatus !== "placeholder"
-      ) {
-        return false;
-      }
-      if (
-        !["all", "not_enriched", "enriched", "failed", "needs_enrichment"].includes(
-          enrichmentFilter
-        ) &&
-        enrichmentStatus !== enrichmentFilter
-      ) {
-        return false;
-      }
-      if (
-        verificationFilter !== "all" &&
-        product.product_verification_status !== verificationFilter
-      ) {
-        return false;
-      }
-      if (imageFilter !== "all" && imageStatus !== imageFilter) return false;
-      if (sourceFilter === "has_source" && !product.source_url) return false;
-      if (sourceFilter === "missing_source" && product.source_url) return false;
-      if (categoryFilter !== "all" && product.category !== categoryFilter) {
-        return false;
-      }
-
+      if (categoryFilter !== "all" && product.category !== categoryFilter) return false;
+      if (statusFilter !== "all" && product.product_verification_status !== statusFilter) return false;
       return true;
     });
 
-    return filtered.sort((first, second) => {
-      if (sortOption === "oldest") {
-        return first.created_at.localeCompare(second.created_at);
+    return [...filtered].sort((first, second) => {
+      if (sortOption === "oldest") return first.created_at.localeCompare(second.created_at);
+      if (sortOption === "name_az") return first.name.localeCompare(second.name);
+      if (sortOption === "name_za") return second.name.localeCompare(first.name);
+      if (sortOption === "issues_first") {
+        return (
+          (productMeta.get(second.id)?.issueChips.length || 0) -
+          (productMeta.get(first.id)?.issueChips.length || 0)
+        );
       }
-      if (sortOption === "name_az") {
-        return first.name.localeCompare(second.name);
-      }
-      if (sortOption === "name_za") {
-        return second.name.localeCompare(first.name);
-      }
-      if (sortOption === "not_enriched_first") {
-        return Number(second.enrichment_status === "not_enriched") - Number(first.enrichment_status === "not_enriched");
-      }
-      if (sortOption === "missing_image_first") {
-        return Number(getImageStatus(second) === "missing") - Number(getImageStatus(first) === "missing");
-      }
-
       return second.created_at.localeCompare(first.created_at);
     });
-  }, [
-    categoryFilter,
-    enrichmentFilter,
-    imageFilter,
-    products,
-    searchText,
-    sortOption,
-    sourceFilter,
-    verificationFilter,
-  ]);
+  }, [categoryFilter, productMeta, products, queueView, searchText, sortOption, statusFilter]);
 
-  async function getAdminSessionToken() {
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
+  const activeProduct = products.find((product) => product.id === activeProductId) || null;
+  const activeMeta = activeProduct ? productMeta.get(activeProduct.id) : null;
 
-    if (!user) {
-      throw new Error("You do not have admin access.");
-    }
-
-    const adminCheck = await checkCurrentUserIsAdmin();
-
-    if (!adminCheck.isAdmin) {
-      throw new Error("You do not have admin access.");
-    }
-
-    const {
-      data: { session },
-    } = await supabase.auth.getSession();
-
-    if (!session?.access_token) {
-      throw new Error("Admin session is missing. Log in again.");
-    }
-
-    return session.access_token;
-  }
-
-  async function updateProductStatus(productId: string, status: ProductStatus) {
+  async function saveIdentity(product: Product) {
+    setWorking(true);
     setMessage("");
-
     try {
       await getAdminSessionToken();
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Admin check failed.");
-      return;
-    }
-
-    const verifiedSource =
-      status === "catalog_verified" ? "manual_admin_review" : null;
-
-    const { error } = await supabase
-      .from("products")
-      .update({
-        product_verification_status: status,
-        verified_source: verifiedSource,
-      })
-      .eq("id", productId);
-
-    if (error) {
-      setMessage(error.message);
-      return;
-    }
-
-    await loadProducts({ clearMessage: false });
-    setMessage("Product updated.");
-  }
-
-  async function saveExternalSummary(productId: string) {
-    setMessage("");
-
-    try {
-      await getAdminSessionToken();
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Admin check failed.");
-      return;
-    }
-
-    const summary = externalSummaryDrafts[productId]?.trim() || null;
-
-    const { error } = await supabase
-      .from("products")
-      .update({
-        external_summary: summary,
-        external_summary_updated_at: summary ? new Date().toISOString() : null,
-      })
-      .eq("id", productId);
-
-    if (error) {
-      setMessage(error.message);
-      return;
-    }
-
-    await loadProducts({ clearMessage: false });
-    setMessage("External source note saved.");
-  }
-
-  async function saveManualCategory(product: Product) {
-    setMessage("");
-
-    try {
-      await getAdminSessionToken();
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Admin check failed.");
-      return;
-    }
-
-    const draft = manualDrafts[product.id];
-    const category = normalizeCategory(draft?.category || product.category || "Other");
-    const productType = draft?.productType?.trim() || null;
-    const specs = {
-      ...(product.specs || {}),
-      category,
-      product_type: productType,
-    };
-
-    const { error } = await supabase
-      .from("products")
-      .update({
+      const draft = manualDrafts[product.id];
+      const category = normalizeCategory(draft?.category || product.category || "Other");
+      const productType = draft?.productType?.trim() || null;
+      const specs = {
+        ...(product.specs || {}),
         category,
-        specs,
-      })
-      .eq("id", product.id);
-
-    if (error) {
-      setMessage(error.message);
-      return;
+        product_type: productType,
+      };
+      const { error } = await supabase
+        .from("products")
+        .update({
+          name: draft?.name?.trim() || product.name,
+          brand: draft?.brand?.trim() || null,
+          model: draft?.model?.trim() || null,
+          category,
+          product_type: productType,
+          specs,
+        })
+        .eq("id", product.id);
+      if (error) throw error;
+      await loadProducts({ clearMessage: false });
+      setMessage("Identity saved.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not save identity.");
+    } finally {
+      setWorking(false);
     }
+  }
 
-    await loadProducts({ clearMessage: false });
-    setMessage("Category and product type updated.");
+  async function applySuggestedIdentity(product: Product) {
+    setManualDrafts((current) => ({
+      ...current,
+      [product.id]: {
+        name: product.suggested_title || current[product.id]?.name || product.name,
+        brand: product.suggested_brand || current[product.id]?.brand || product.brand || "",
+        model: product.suggested_model || current[product.id]?.model || product.model || "",
+        category: product.suggested_category || current[product.id]?.category || product.category || "",
+        productType:
+          product.suggested_product_type ||
+          current[product.id]?.productType ||
+          product.specs?.product_type ||
+          "",
+      },
+    }));
+    setMessage("Suggested identity copied into the editor. Save it to apply.");
+  }
+
+  async function saveSpecs(product: Product) {
+    setWorking(true);
+    setMessage("");
+    try {
+      await getAdminSessionToken();
+      const specs = rowsToSpecs(product, specDrafts[product.id] || []);
+      const { error } = await supabase
+        .from("products")
+        .update({ specs, specs_confidence: 0.9 })
+        .eq("id", product.id);
+      if (error) throw error;
+      await loadProducts({ clearMessage: false });
+      setMessage("Specs saved.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not save specs.");
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function approveAllSpecs(product: Product) {
+    setWorking(true);
+    setMessage("");
+    try {
+      await getAdminSessionToken();
+      const approvedRows = (specDrafts[product.id] || []).map((row) => ({
+        ...row,
+        status: "approved" as const,
+      }));
+      const specs = rowsToSpecs(product, approvedRows);
+      const now = new Date().toISOString();
+      const { error } = await supabase
+        .from("products")
+        .update({
+          specs,
+          specs_confidence: 0.9,
+          specs_approved_at: now,
+        })
+        .eq("id", product.id);
+      if (error) throw error;
+      setSpecDrafts((current) => ({ ...current, [product.id]: approvedRows }));
+      await loadProducts({ clearMessage: false });
+      setMessage("All specs approved.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not approve specs.");
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function saveImage(product: Product) {
+    setWorking(true);
+    setMessage("");
+    try {
+      await getAdminSessionToken();
+      const imageUrl = imageDrafts[product.id]?.trim() || null;
+      const { error } = await supabase
+        .from("products")
+        .update({
+          image_url: imageUrl,
+          main_image_url: imageUrl,
+          image_confidence: imageUrl && !isPlaceholderImage(imageUrl) ? 0.9 : 0.2,
+        })
+        .eq("id", product.id);
+      if (error) throw error;
+      await loadProducts({ clearMessage: false });
+      setMessage("Image saved.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not save image.");
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function saveSourceNote(product: Product) {
+    setWorking(true);
+    setMessage("");
+    try {
+      await getAdminSessionToken();
+      const summary = sourceNoteDrafts[product.id]?.trim() || null;
+      const { error } = await supabase
+        .from("products")
+        .update({
+          external_summary: summary,
+          external_summary_updated_at: summary ? new Date().toISOString() : null,
+        })
+        .eq("id", product.id);
+      if (error) throw error;
+      await loadProducts({ clearMessage: false });
+      setMessage("Source note saved.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not save source note.");
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function approveProductReview(productId: string, field: "identity" | "specs" | "image" | "duplicate") {
+    setWorking(true);
+    setMessage("");
+    try {
+      await getAdminSessionToken();
+      const now = new Date().toISOString();
+      const patch =
+        field === "identity"
+          ? { identity_approved_at: now }
+          : field === "specs"
+            ? { specs_approved_at: now }
+            : field === "image"
+              ? { image_approved_at: now }
+              : { duplicate_reviewed_at: now };
+      const { error } = await supabase.from("products").update(patch).eq("id", productId);
+      if (error) throw error;
+      await loadProducts({ clearMessage: false });
+      setMessage("Review approval saved.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not approve review.");
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function updateProductStatus(product: Product, status: ProductStatus) {
+    setWorking(true);
+    setMessage("");
+    try {
+      await getAdminSessionToken();
+      if (status === "catalog_verified" && !isCatalogReady(product)) {
+        setMessage(getReadyBlocker(product) || "Product is not ready.");
+        setWorking(false);
+        return;
+      }
+      const { error } = await supabase
+        .from("products")
+        .update({
+          product_verification_status: status,
+          verified_source: status === "catalog_verified" ? "manual_admin_review" : null,
+        })
+        .eq("id", product.id);
+      if (error) throw error;
+      await loadProducts({ clearMessage: false });
+      setMessage("Product status updated.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not update product.");
+    } finally {
+      setWorking(false);
+    }
   }
 
   async function enrichProduct(productId: string, reloadAfter = true) {
     setMessage("");
     setEnrichingProductId(productId);
-
-    let token = "";
     try {
-      token = await getAdminSessionToken();
+      const token = await getAdminSessionToken();
+      const response = await fetch("/api/admin/enrich-product", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ productId }),
+      });
+      const result = (await response.json()) as { error?: string; reviewLinkCount?: number };
+      if (!response.ok) throw new Error(result.error || "Could not enrich product.");
+      if (reloadAfter) {
+        await loadProducts({ clearMessage: false });
+        setMessage(
+          `Enrichment complete.${
+            result.reviewLinkCount ? ` Found ${result.reviewLinkCount} source links.` : ""
+          }`
+        );
+      }
+      return true;
     } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not enrich product.");
+      return false;
+    } finally {
       setEnrichingProductId("");
-      setMessage(error instanceof Error ? error.message : "Admin check failed.");
-      return false;
     }
-
-    const response = await fetch("/api/admin/enrich-product", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ productId }),
-    });
-
-    const result = (await response.json()) as {
-      error?: string;
-      reviewLinkCount?: number;
-    };
-
-    setEnrichingProductId("");
-
-    if (!response.ok) {
-      setMessage(result.error || "Could not enrich product.");
-      return false;
-    }
-
-    if (reloadAfter) {
-      await loadProducts({ clearMessage: false });
-      setMessage(
-        `Product facts updated from external source snippets.${
-          result.reviewLinkCount
-            ? ` Found ${result.reviewLinkCount} external review/source links.`
-            : ""
-        }`
-      );
-    }
-
-    return true;
   }
 
-  async function batchEnrich(limit: number) {
-    setBatchLoading(true);
-    setMessage(`Batch enrichment started for up to ${limit} products.`);
-
-    const targets = filteredProducts.slice(0, limit);
+  async function bulkEnrichSelected() {
+    setWorking(true);
     let enriched = 0;
     let failed = 0;
-    let skipped = 0;
-
-    for (const product of targets) {
-      const ok = await enrichProduct(product.id, false);
+    for (const id of selectedIds) {
+      const ok = await enrichProduct(id, false);
       if (ok) enriched++;
       else failed++;
     }
-
-    skipped = Math.max(filteredProducts.length - targets.length, 0);
-    setBatchLoading(false);
     await loadProducts({ clearMessage: false });
-    setMessage(
-      `Batch complete. Enriched: ${enriched}. Failed: ${failed}. Skipped: ${skipped}.`
-    );
+    setWorking(false);
+    setMessage(`Selected enrichment complete. Enriched: ${enriched}. Failed: ${failed}.`);
   }
 
-  async function batchMark(status: ProductStatus) {
-    setBatchLoading(true);
+  async function bulkMark(status: ProductStatus) {
+    setWorking(true);
     setMessage("");
-
     try {
       await getAdminSessionToken();
+      const { error } = await supabase
+        .from("products")
+        .update({
+          product_verification_status: status,
+          verified_source: status === "catalog_verified" ? "manual_admin_review" : null,
+        })
+        .in("id", selectedIds);
+      if (error) throw error;
+      await loadProducts({ clearMessage: false });
+      setSelectedIds([]);
+      setMessage(`Updated ${selectedIds.length} selected products.`);
     } catch (error) {
-      setBatchLoading(false);
-      setMessage(error instanceof Error ? error.message : "Admin check failed.");
-      return;
+      setMessage(error instanceof Error ? error.message : "Could not update selected products.");
+    } finally {
+      setWorking(false);
     }
+  }
 
-    const ids = filteredProducts.slice(0, 100).map((product) => product.id);
-
-    if (ids.length === 0) {
-      setBatchLoading(false);
-      setMessage("No filtered products to update.");
-      return;
+  async function bulkApproveReady() {
+    const ready = products.filter((product) => selectedIds.includes(product.id) && isCatalogReady(product));
+    const skipped = selectedIds.length - ready.length;
+    setWorking(true);
+    setMessage("");
+    try {
+      await getAdminSessionToken();
+      if (ready.length > 0) {
+        const { error } = await supabase
+          .from("products")
+          .update({
+            product_verification_status: "catalog_verified",
+            verified_source: "manual_admin_review",
+          })
+          .in(
+            "id",
+            ready.map((product) => product.id)
+          );
+        if (error) throw error;
+      }
+      await loadProducts({ clearMessage: false });
+      setSelectedIds([]);
+      setMessage(
+        `Approved ${ready.length} ready products.${
+          skipped ? ` ${skipped} selected products were not ready and were skipped.` : ""
+        }`
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not approve selected products.");
+    } finally {
+      setWorking(false);
     }
-
-    const { error } = await supabase
-      .from("products")
-      .update({
-        product_verification_status: status,
-        verified_source:
-          status === "catalog_verified" ? "manual_admin_review" : null,
-      })
-      .in("id", ids);
-
-    setBatchLoading(false);
-
-    if (error) {
-      setMessage(error.message);
-      return;
-    }
-
-    await loadProducts({ clearMessage: false });
-    setMessage(`Updated ${ids.length} filtered products.`);
   }
 
   if (loading) {
     return (
       <main className="mx-auto max-w-5xl px-5 py-12">
         <div className="card p-6">
-          <h1 className="text-3xl font-black">Loading admin products...</h1>
+          <h1 className="text-3xl font-black">Loading product review queue...</h1>
         </div>
       </main>
     );
@@ -560,216 +979,180 @@ export default function AdminProductsPage() {
   }
 
   return (
-    <main className="mx-auto max-w-7xl px-5 py-12">
-      <section className="mb-8">
-        <p className="font-bold text-muted">Admin</p>
-        <h1 className="mt-2 text-4xl font-black">Product manager</h1>
-        <p className="mt-3 max-w-2xl text-muted">
-          Search, filter, enrich, and review imported product catalog entries.
-        </p>
-
-        <div className="mt-5 flex flex-wrap gap-3">
-          <Link href="/admin/import-products" className="btn btn-dark">
-            CSV import
+    <main className="mx-auto max-w-7xl px-5 py-10">
+      <section className="mb-6 flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <p className="font-bold text-muted">Admin</p>
+          <h1 className="mt-1 text-4xl font-black">Product review queue</h1>
+          <p className="mt-3 max-w-3xl text-muted">
+            Compact issue-first review for imported and community-created products.
+            Open a product to edit identity, specs, images, duplicate checks, enrichment,
+            and final status.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-3">
+          <Link href="/admin/product-factory" className="btn btn-dark">
+            Product Factory
           </Link>
-          <Link href="/admin/import-urls" className="btn btn-dark">
-            Import URLs
+          <Link href="/admin/product-submissions" className="btn">
+            Submissions
           </Link>
           <Link href="/admin/owner-verifications" className="btn">
             Owner verifications
           </Link>
-          <Link href="/explore" className="btn">
-            Explore catalog
-          </Link>
+        </div>
+      </section>
+
+      {message && (
+        <p className="mb-5 rounded-2xl bg-slate-100 p-4 text-sm font-bold">
+          {message}
+        </p>
+      )}
+
+      <section className="card p-4">
+        <div className="flex gap-2 overflow-x-auto pb-2">
+          {QUEUE_VIEWS.map((view) => (
+            <button
+              key={view.id}
+              type="button"
+              className={`shrink-0 rounded-full px-4 py-2 text-sm font-black ${
+                queueView === view.id ? "bg-black text-white" : "bg-slate-100 text-slate-700"
+              }`}
+              onClick={() => {
+                setQueueView(view.id);
+                setSelectedIds([]);
+              }}
+            >
+              {view.label} ({counts[view.id] || 0})
+            </button>
+          ))}
         </div>
 
-        {message && (
-          <p className="mt-4 rounded-2xl bg-slate-100 p-4 text-sm font-bold">
-            {message}
-          </p>
-        )}
-      </section>
+        <div className="mt-4 grid gap-3 md:grid-cols-[1fr_180px_160px_auto]">
+          <input
+            className="input"
+            value={searchText}
+            onChange={(event) => setSearchText(event.target.value)}
+            placeholder="Search name, brand, model, category, source URL..."
+          />
+          <select
+            className="input"
+            value={sortOption}
+            onChange={(event) => setSortOption(event.target.value)}
+          >
+            <option value="newest">Newest first</option>
+            <option value="oldest">Oldest first</option>
+            <option value="issues_first">Most issues first</option>
+            <option value="name_az">Name A-Z</option>
+            <option value="name_za">Name Z-A</option>
+          </select>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => setShowAdvanced((current) => !current)}
+          >
+            Advanced filters
+          </button>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => setPageLimit((current) => current + 150)}
+          >
+            Load more
+          </button>
+        </div>
 
-      <section className="grid gap-3 md:grid-cols-4 lg:grid-cols-8">
-        {[
-          ["Total", counts.total],
-          ["Enriched", counts.enriched],
-          ["Not enriched", counts.notEnriched],
-          ["Failed", counts.failed],
-          ["Missing image", counts.missingImage],
-          ["Placeholder", counts.placeholderImage],
-          ["Needs review", counts.needsReview],
-          ["Catalog verified", counts.catalogVerified],
-        ].map(([label, value]) => (
-          <div key={label} className="rounded-2xl bg-slate-50 p-4">
-            <p className="text-2xl font-black">{value}</p>
-            <p className="text-xs font-bold text-muted">{label}</p>
-          </div>
-        ))}
-      </section>
-
-      <section className="card mt-6 p-5">
-        <div className="grid gap-4 md:grid-cols-3 lg:grid-cols-4">
-          <div>
-            <label className="label">Search</label>
-            <input
-              className="input mt-2"
-              value={searchText}
-              onChange={(event) => setSearchText(event.target.value)}
-              placeholder="Name, brand, category, source URL"
-            />
-          </div>
-
-          <div>
-            <label className="label">Enrichment</label>
+        {showAdvanced && (
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
             <select
-              className="input mt-2"
-              value={enrichmentFilter}
-              onChange={(event) => setEnrichmentFilter(event.target.value)}
-            >
-              <option value="all">All</option>
-              <option value="not_enriched">Not enriched</option>
-              <option value="enriched">Enriched</option>
-              <option value="failed">Failed</option>
-              <option value="needs_enrichment">Needs enrichment</option>
-              {enrichmentStatuses.map((status) => (
-                <option key={status} value={status}>
-                  {formatStatus(status)}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label className="label">Verification</label>
-            <select
-              className="input mt-2"
-              value={verificationFilter}
-              onChange={(event) => setVerificationFilter(event.target.value)}
-            >
-              <option value="all">All</option>
-              <option value="catalog_verified">Catalog verified</option>
-              <option value="user_submitted">User submitted</option>
-              <option value="needs_review">Needs review</option>
-              <option value="rejected">Rejected</option>
-            </select>
-          </div>
-
-          <div>
-            <label className="label">Image</label>
-            <select
-              className="input mt-2"
-              value={imageFilter}
-              onChange={(event) => setImageFilter(event.target.value)}
-            >
-              <option value="all">All</option>
-              <option value="has_image">Has image</option>
-              <option value="missing">Missing image</option>
-              <option value="placeholder">Placeholder image</option>
-            </select>
-          </div>
-
-          <div>
-            <label className="label">Source</label>
-            <select
-              className="input mt-2"
-              value={sourceFilter}
-              onChange={(event) => setSourceFilter(event.target.value)}
-            >
-              <option value="all">All</option>
-              <option value="has_source">Has source URL</option>
-              <option value="missing_source">Missing source URL</option>
-            </select>
-          </div>
-
-          <div>
-            <label className="label">Category</label>
-            <select
-              className="input mt-2"
+              className="input"
               value={categoryFilter}
               onChange={(event) => setCategoryFilter(event.target.value)}
             >
-              <option value="all">All</option>
+              <option value="all">All categories</option>
               {categories.map((category) => (
                 <option key={category} value={category}>
                   {category}
                 </option>
               ))}
             </select>
-          </div>
-
-          <div>
-            <label className="label">Sort</label>
             <select
-              className="input mt-2"
-              value={sortOption}
-              onChange={(event) => setSortOption(event.target.value)}
+              className="input"
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value)}
             >
-              <option value="newest">Newest first</option>
-              <option value="oldest">Oldest first</option>
-              <option value="name_az">Name A-Z</option>
-              <option value="name_za">Name Z-A</option>
-              <option value="not_enriched_first">Not enriched first</option>
-              <option value="missing_image_first">Missing image first</option>
+              <option value="all">All statuses</option>
+              <option value="catalog_verified">Catalog verified</option>
+              <option value="community_created">Community-created</option>
+              <option value="pending_enrichment">Pending enrichment</option>
+              <option value="needs_review">Needs review</option>
+              <option value="rejected">Rejected</option>
             </select>
           </div>
-        </div>
+        )}
 
-        <div className="mt-5 flex flex-wrap gap-3">
-          <button
-            type="button"
-            className="btn btn-dark"
-            onClick={() => batchEnrich(10)}
-            disabled={batchLoading}
-          >
-            Enrich filtered · 10
-          </button>
-          <button
-            type="button"
-            className="btn btn-dark"
-            onClick={() => batchEnrich(50)}
-            disabled={batchLoading}
-          >
-            Enrich filtered · 50
-          </button>
-          <button
-            type="button"
-            className="btn"
-            onClick={() => batchMark("needs_review")}
-            disabled={batchLoading}
-          >
-            Mark filtered needs review
-          </button>
-          <button
-            type="button"
-            className="btn"
-            onClick={() => batchMark("catalog_verified")}
-            disabled={batchLoading}
-          >
-            Mark filtered catalog verified
-          </button>
-        </div>
+        {selectedIds.length > 0 && (
+          <div className="mt-4 flex flex-wrap items-center gap-3 rounded-2xl bg-slate-50 p-3">
+            <p className="text-sm font-black">{selectedIds.length} selected</p>
+            <button className="btn" type="button" onClick={bulkEnrichSelected} disabled={working}>
+              Run enrichment
+            </button>
+            <button className="btn" type="button" onClick={() => bulkMark("needs_review")} disabled={working}>
+              Mark needs review
+            </button>
+            <button className="btn" type="button" onClick={() => bulkMark("rejected")} disabled={working}>
+              Reject selected
+            </button>
+            <button className="btn btn-dark" type="button" onClick={bulkApproveReady} disabled={working}>
+              Approve selected ready products
+            </button>
+          </div>
+        )}
       </section>
 
-      <section className="mt-6">
-        <p className="mb-3 text-sm font-bold text-muted">
-          Showing {filteredProducts.length} of {products.length} loaded products.
-        </p>
-
-        {filteredProducts.length === 0 ? (
-          <div className="card p-6">
-            <h2 className="text-2xl font-black">No matching products</h2>
-            <p className="mt-3 text-muted">Adjust filters or load more.</p>
+      <section className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1fr)_420px]">
+        <div className="card overflow-hidden">
+          <div className="border-b bg-slate-50 px-4 py-3 text-sm font-bold text-muted">
+            Showing {filteredProducts.length} of {products.length} loaded products
           </div>
-        ) : (
-          <div className="space-y-4">
-            {filteredProducts.map((product) => {
-              const imageStatus = getImageStatus(product);
 
-              return (
-                <div key={product.id} className="card p-5">
-                  <div className="grid gap-5 md:grid-cols-[96px_1fr]">
-                    <div className="h-24 w-full overflow-hidden rounded-2xl bg-slate-100">
+          {filteredProducts.length === 0 ? (
+            <div className="p-6">
+              <h2 className="text-2xl font-black">No matching products</h2>
+              <p className="mt-2 text-muted">Try another view or search.</p>
+            </div>
+          ) : (
+            <div className="divide-y">
+              {filteredProducts.map((product) => {
+                const meta = productMeta.get(product.id);
+                const duplicateRisk = meta?.duplicateRisk || "Low";
+                const specRows = meta?.specRows || [];
+                const recommendedCount = Math.max(
+                  getCategorySpecKeys(product.category).length,
+                  specRows.length
+                );
+                const imageStatus = getImageStatus(product);
+                const active = activeProductId === product.id;
+
+                return (
+                  <article
+                    key={product.id}
+                    className={`grid gap-3 p-4 md:grid-cols-[32px_64px_minmax(220px,1fr)_180px_160px_180px] md:items-center ${
+                      active ? "bg-slate-50" : ""
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.includes(product.id)}
+                      onChange={(event) =>
+                        setSelectedIds((current) =>
+                          event.target.checked
+                            ? [...current, product.id]
+                            : current.filter((id) => id !== product.id)
+                        )
+                      }
+                    />
+                    <div className="h-16 w-16 overflow-hidden rounded-xl bg-slate-100">
                       <ProductImage
                         src={product.image_url}
                         category={product.category}
@@ -777,200 +1160,731 @@ export default function AdminProductsPage() {
                         className="h-full w-full object-cover"
                       />
                     </div>
-
-                    <div>
+                    <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
-                        <span
-                          className={`rounded-full px-3 py-1 text-xs font-black ${getBadgeClass(
-                            product.enrichment_status || "not_enriched"
-                          )}`}
-                        >
-                          {formatStatus(product.enrichment_status)}
-                        </span>
-                        <span
-                          className={`rounded-full px-3 py-1 text-xs font-black ${getBadgeClass(
-                            product.product_verification_status
-                          )}`}
-                        >
+                        <h2 className="truncate text-lg font-black">{product.name}</h2>
+                        <span className={`rounded-full px-2 py-0.5 text-xs font-black ${chipClass(product.product_verification_status === "catalog_verified" ? "good" : product.product_verification_status === "rejected" ? "bad" : "neutral")}`}>
                           {formatStatus(product.product_verification_status)}
                         </span>
-                        <span
-                          className={`rounded-full px-3 py-1 text-xs font-black ${getBadgeClass(
-                            imageStatus
-                          )}`}
-                        >
-                          {getImageStatusLabel(imageStatus)}
-                        </span>
                       </div>
-
-                      <h2 className="mt-2 text-2xl font-black">
-                        {product.name}
-                      </h2>
                       <p className="mt-1 text-sm font-bold text-muted">
-                        {product.brand || "Unknown brand"} ·{" "}
-                        {product.category || "Uncategorized"}
+                        {product.brand || "Unknown brand"} / {product.category || "Uncategorized"}
+                        {product.specs?.product_type ? ` / ${product.specs.product_type}` : ""}
                       </p>
-                      {product.specs?.product_type && (
-                        <p className="mt-1 text-sm font-bold text-slate-700">
-                          Product type: {product.specs.product_type}
+                      <div className="mt-2 flex flex-wrap gap-1">
+                        {(meta?.issueChips || []).map((chip) => (
+                          <span key={chip.label} className={`rounded-full px-2 py-0.5 text-xs font-black ${chipClass(chip.tone)}`}>
+                            {chip.label}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                    <div>
+                      <p className="text-sm font-black">Duplicate: {duplicateRisk}</p>
+                      {meta?.duplicateCandidates[0] && (
+                        <p className="mt-1 truncate text-xs font-bold text-muted">
+                          {meta.duplicateCandidates[0].product.name} / {Math.round(meta.duplicateCandidates[0].score * 100)}%
                         </p>
                       )}
-
-                      <div className="mt-3 flex flex-wrap gap-3 text-sm font-bold">
-                        <Link
-                          href={`/product/${product.slug}`}
-                          className="underline"
-                        >
-                          View product page
-                        </Link>
-
-                        {product.source_url ? (
-                          <a
-                            href={product.source_url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="underline"
-                          >
-                            Source URL
-                          </a>
-                        ) : (
-                          <span className="text-muted">No source URL</span>
-                        )}
-                      </div>
-
-                      <details className="mt-4 rounded-2xl bg-slate-50 p-4">
-                        <summary className="cursor-pointer font-black">
-                          Product actions
-                        </summary>
-
-                        <label className="label mt-4">External source note</label>
-                        <textarea
-                          className="input mt-2 min-h-24"
-                          value={externalSummaryDrafts[product.id] || ""}
-                          onChange={(event) =>
-                            setExternalSummaryDrafts((current) => ({
-                              ...current,
-                              [product.id]: event.target.value,
-                            }))
-                          }
-                          placeholder="Add a short external source note manually..."
-                        />
-
-                        <div className="mt-4 grid gap-3 md:grid-cols-2">
-                          <div>
-                            <label className="label">Category</label>
-                            <input
-                              className="input mt-2"
-                              value={manualDrafts[product.id]?.category || ""}
-                              onChange={(event) =>
-                                setManualDrafts((current) => ({
-                                  ...current,
-                                  [product.id]: {
-                                    category: event.target.value,
-                                    productType:
-                                      current[product.id]?.productType ||
-                                      product.specs?.product_type ||
-                                      "",
-                                  },
-                                }))
-                              }
-                              placeholder="Camera, Headphones, Microphones..."
-                            />
-                          </div>
-
-                          <div>
-                            <label className="label">Product type</label>
-                            <input
-                              className="input mt-2"
-                              value={manualDrafts[product.id]?.productType || ""}
-                              onChange={(event) =>
-                                setManualDrafts((current) => ({
-                                  ...current,
-                                  [product.id]: {
-                                    category:
-                                      current[product.id]?.category ||
-                                      product.category ||
-                                      "",
-                                    productType: event.target.value,
-                                  },
-                                }))
-                              }
-                              placeholder="Pocket gimbal camera"
-                            />
-                          </div>
-                        </div>
-
-                        <div className="mt-4 flex flex-wrap gap-3">
-                          <button
-                            type="button"
-                            className="btn btn-dark"
-                            onClick={() => saveExternalSummary(product.id)}
-                          >
-                            Save source note
-                          </button>
-                          <button
-                            type="button"
-                            className="btn"
-                            onClick={() => saveManualCategory(product)}
-                          >
-                            Save category/type
-                          </button>
-                          <button
-                            type="button"
-                            className="btn"
-                            onClick={() => enrichProduct(product.id)}
-                            disabled={enrichingProductId === product.id}
-                          >
-                            {enrichingProductId === product.id
-                              ? "Enriching..."
-                              : "Enrich product"}
-                          </button>
-                          <button
-                            type="button"
-                            className="btn"
-                            onClick={() =>
-                              updateProductStatus(product.id, "catalog_verified")
-                            }
-                          >
-                            Catalog verified
-                          </button>
-                          <button
-                            type="button"
-                            className="btn"
-                            onClick={() =>
-                              updateProductStatus(product.id, "needs_review")
-                            }
-                          >
-                            Needs review
-                          </button>
-                          <button
-                            type="button"
-                            className="btn"
-                            onClick={() =>
-                              updateProductStatus(product.id, "rejected")
-                            }
-                          >
-                            Reject
-                          </button>
-                        </div>
-                      </details>
                     </div>
+                    <div>
+                      <p className="text-sm font-black">
+                        Specs {specRows.filter((row) => row.value.trim()).length}/{recommendedCount || 1}
+                      </p>
+                      <p className="mt-1 text-xs font-bold text-muted">
+                        {getImageStatusLabel(product)}
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        className="btn btn-dark"
+                        onClick={() => {
+                          setActiveProductId(product.id);
+                          setActiveTab("overview");
+                        }}
+                      >
+                        Review
+                      </button>
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={() => {
+                          setActiveProductId(product.id);
+                          setActiveTab(
+                            meta?.suggestedAction.includes("duplicate")
+                              ? "duplicate"
+                              : meta?.suggestedAction.includes("spec")
+                                ? "specs"
+                                : meta?.suggestedAction.includes("image")
+                                  ? "image"
+                                  : meta?.suggestedAction.includes("identity")
+                                    ? "identity"
+                                    : "status"
+                          );
+                        }}
+                      >
+                        {meta?.suggestedAction || "Review"}
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <aside className="xl:sticky xl:top-24 xl:self-start">
+          {!activeProduct || !activeMeta ? (
+            <section className="card p-6">
+              <h2 className="text-2xl font-black">Review panel</h2>
+              <p className="mt-2 text-muted">
+                Select Review on a product row to open details without expanding the full queue.
+              </p>
+            </section>
+          ) : (
+            <section className="card max-h-[calc(100vh-7rem)] overflow-y-auto p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-bold text-muted">Product review</p>
+                  <h2 className="mt-1 text-2xl font-black">{activeProduct.name}</h2>
+                  <p className="mt-1 text-sm font-bold text-muted">
+                    {activeProduct.brand || "Unknown brand"} / {activeProduct.category || "Uncategorized"}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="text-sm font-black underline"
+                  onClick={() => setActiveProductId("")}
+                >
+                  Close
+                </button>
+              </div>
+
+              <div className="mt-4 flex gap-2 overflow-x-auto pb-2">
+                {(["overview", "identity", "specs", "image", "duplicate", "enrichment", "status"] as ReviewTab[]).map((tab) => (
+                  <button
+                    key={tab}
+                    type="button"
+                    className={`shrink-0 rounded-full px-3 py-1 text-xs font-black ${
+                      activeTab === tab ? "bg-black text-white" : "bg-slate-100 text-slate-700"
+                    }`}
+                    onClick={() => setActiveTab(tab)}
+                  >
+                    {formatStatus(tab)}
+                  </button>
+                ))}
+              </div>
+
+              {activeTab === "overview" && (
+                <div className="mt-4 space-y-4">
+                  <div className="h-56 overflow-hidden rounded-2xl bg-slate-100">
+                    <ProductImage
+                      src={activeProduct.image_url}
+                      category={activeProduct.category}
+                      alt={activeProduct.name}
+                      className="h-full w-full object-cover"
+                    />
+                  </div>
+                  <div className="rounded-2xl bg-slate-50 p-4">
+                    <p className="text-xs font-black uppercase text-muted">Suggested next action</p>
+                    <p className="mt-1 text-xl font-black">{activeMeta.suggestedAction}</p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {activeMeta.issueChips.map((chip) => (
+                      <span key={chip.label} className={`rounded-full px-3 py-1 text-xs font-black ${chipClass(chip.tone)}`}>
+                        {chip.label}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {[
+                      ["Identity", activeProduct.identity_approved_at],
+                      ["Specs", activeProduct.specs_approved_at],
+                      ["Image", activeProduct.image_approved_at],
+                      ["Duplicate", activeProduct.duplicate_reviewed_at],
+                    ].map(([label, approved]) => (
+                      <div key={label as string} className="rounded-2xl bg-slate-50 p-3">
+                        <p className="font-black">{label}</p>
+                        <p className={`text-sm font-bold ${approved ? "text-emerald-800" : "text-amber-800"}`}>
+                          {approved ? "Approved" : "Needs review"}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="flex flex-wrap gap-3">
+                    <Link href={`/product/${activeProduct.slug}`} className="btn">
+                      View product
+                    </Link>
+                    {activeProduct.source_url && (
+                      <a href={activeProduct.source_url} target="_blank" rel="noreferrer" className="btn">
+                        Source
+                      </a>
+                    )}
                   </div>
                 </div>
-              );
-            })}
-          </div>
-        )}
+              )}
 
-        <div className="mt-6 flex justify-center">
-          <button
-            type="button"
-            className="btn"
-            onClick={() => setPageLimit((current) => current + 100)}
-          >
-            Load more
-          </button>
-        </div>
+              {activeTab === "identity" && (
+                <div className="mt-4 space-y-4">
+                  {(activeProduct.suggested_title ||
+                    activeProduct.suggested_brand ||
+                    activeProduct.suggested_category ||
+                    activeProduct.suggested_product_type) && (
+                    <div className="rounded-2xl bg-amber-50 p-4 text-sm font-bold text-amber-900">
+                      Suggested: {[activeProduct.suggested_brand, activeProduct.suggested_title].filter(Boolean).join(" ")}
+                      <br />
+                      {[activeProduct.suggested_category, activeProduct.suggested_product_type].filter(Boolean).join(" / ")}
+                      <button type="button" className="mt-3 block underline" onClick={() => applySuggestedIdentity(activeProduct)}>
+                        Apply suggested identity to editor
+                      </button>
+                    </div>
+                  )}
+
+                  {[
+                    ["name", "Product title"],
+                    ["brand", "Brand"],
+                    ["model", "Model / variant"],
+                    ["category", "Category"],
+                    ["productType", "Product type"],
+                  ].map(([key, label]) => (
+                    <div key={key}>
+                      <label className="label">{label}</label>
+                      <input
+                        className="input mt-2"
+                        value={manualDrafts[activeProduct.id]?.[key as keyof (typeof manualDrafts)[string]] || ""}
+                        onChange={(event) =>
+                          setManualDrafts((current) => ({
+                            ...current,
+                            [activeProduct.id]: {
+                              ...current[activeProduct.id],
+                              [key]: event.target.value,
+                            },
+                          }))
+                        }
+                      />
+                    </div>
+                  ))}
+
+                  {activeProduct.enrichment_warnings?.some((warning) =>
+                    warning.toLowerCase().includes("product type")
+                  ) && (
+                    <p className="rounded-2xl bg-red-50 p-3 text-sm font-bold text-red-700">
+                      Product type may conflict with product identity. Review before approving identity.
+                    </p>
+                  )}
+
+                  <div className="flex flex-wrap gap-3">
+                    <button type="button" className="btn" onClick={() => saveIdentity(activeProduct)} disabled={working}>
+                      Save identity
+                    </button>
+                    <button type="button" className="btn btn-dark" onClick={() => approveProductReview(activeProduct.id, "identity")} disabled={working}>
+                      Approve identity
+                    </button>
+                    <button type="button" className="btn" onClick={() => updateProductStatus(activeProduct, "needs_review")} disabled={working}>
+                      Mark identity needs review
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {activeTab === "specs" && (
+                <div className="mt-4 space-y-4">
+                  {(() => {
+                    const rows = specDrafts[activeProduct.id] || [];
+                    const sourceSummary = getSpecSourceSummary(activeProduct, rows);
+
+                    return (
+                      <>
+                        <div className="rounded-2xl bg-slate-50 p-4">
+                          <p className="text-sm font-black">
+                            {sourceSummary.filledCount} specs imported
+                            {sourceSummary.sourceLabel
+                              ? ` from ${sourceSummary.sourceLabel}`
+                              : ""}
+                          </p>
+                          <p className="mt-1 text-sm font-bold text-muted">
+                            Source: {activeProduct.source_url ? "product source URL" : sourceSummary.sourceLabel}
+                          </p>
+                          <p className="mt-1 text-sm font-bold text-muted">
+                            Status:{" "}
+                            {activeProduct.specs_approved_at
+                              ? "Specs approved"
+                              : sourceSummary.unreviewedCount > 0
+                                ? "Specs need review"
+                                : "Ready for approval"}
+                          </p>
+                        </div>
+
+                        {rows.filter((row) => row.value.trim()).length === 0 ? (
+                          <p className="rounded-2xl bg-slate-50 p-4 text-sm font-bold text-muted">
+                            No filled specs yet. Add a spec or use missing recommended specs below.
+                          </p>
+                        ) : (
+                          <div className="space-y-2">
+                            {rows.map((row, index) => (
+                              <div
+                                key={`${row.key}-${index}`}
+                                className="rounded-2xl border p-3"
+                              >
+                                <div className="grid gap-2 sm:grid-cols-[1fr_1.3fr_auto]">
+                                  <input
+                                    className="input"
+                                    value={row.label || row.key}
+                                    placeholder="Label or key"
+                                    onChange={(event) =>
+                                      setSpecDrafts((current) => ({
+                                        ...current,
+                                        [activeProduct.id]: (current[activeProduct.id] || []).map((item, itemIndex) =>
+                                          itemIndex === index
+                                            ? {
+                                                ...item,
+                                                label: event.target.value,
+                                                key: item.key || event.target.value.toLowerCase().replace(/\s+/g, "_"),
+                                              }
+                                            : item
+                                        ),
+                                      }))
+                                    }
+                                  />
+                                  <input
+                                    className="input"
+                                    value={row.value}
+                                    placeholder="Value"
+                                    onChange={(event) =>
+                                      setSpecDrafts((current) => ({
+                                        ...current,
+                                        [activeProduct.id]: (current[activeProduct.id] || []).map((item, itemIndex) =>
+                                          itemIndex === index ? { ...item, value: event.target.value } : item
+                                        ),
+                                      }))
+                                    }
+                                  />
+                                  <button
+                                    type="button"
+                                    className="btn"
+                                    onClick={() =>
+                                      setSpecDrafts((current) => ({
+                                        ...current,
+                                        [activeProduct.id]: (current[activeProduct.id] || []).filter(
+                                          (_item, itemIndex) => itemIndex !== index
+                                        ),
+                                      }))
+                                    }
+                                  >
+                                    Remove
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        <details
+                          className="rounded-2xl bg-slate-50 p-4"
+                          open={sourceSummary.shouldShowAdvanced}
+                        >
+                          <summary className="cursor-pointer font-black">
+                            Advanced spec metadata
+                            {sourceSummary.lowConfidenceCount > 0
+                              ? ` · ${sourceSummary.lowConfidenceCount} low confidence`
+                              : ""}
+                            {sourceSummary.hasMixedSources ? " · mixed sources" : ""}
+                          </summary>
+                          <div className="mt-3 space-y-3">
+                            {rows.map((row, index) => (
+                              <div
+                                key={`${row.key}-metadata-${index}`}
+                                className="rounded-2xl bg-white p-3"
+                              >
+                                <p className="mb-2 text-sm font-black">
+                                  {row.label || row.key || `Spec ${index + 1}`}
+                                </p>
+                                <div className="grid gap-2 sm:grid-cols-2">
+                                  <input
+                                    className="input"
+                                    value={row.key}
+                                    placeholder="key"
+                                    onChange={(event) =>
+                                      setSpecDrafts((current) => ({
+                                        ...current,
+                                        [activeProduct.id]: (current[activeProduct.id] || []).map((item, itemIndex) =>
+                                          itemIndex === index ? { ...item, key: event.target.value } : item
+                                        ),
+                                      }))
+                                    }
+                                  />
+                                  <input
+                                    className="input"
+                                    value={row.source_type}
+                                    placeholder="source type"
+                                    onChange={(event) =>
+                                      setSpecDrafts((current) => ({
+                                        ...current,
+                                        [activeProduct.id]: (current[activeProduct.id] || []).map((item, itemIndex) =>
+                                          itemIndex === index ? { ...item, source_type: event.target.value } : item
+                                        ),
+                                      }))
+                                    }
+                                  />
+                                  <input
+                                    className="input"
+                                    value={row.source_url}
+                                    placeholder="source URL"
+                                    onChange={(event) =>
+                                      setSpecDrafts((current) => ({
+                                        ...current,
+                                        [activeProduct.id]: (current[activeProduct.id] || []).map((item, itemIndex) =>
+                                          itemIndex === index ? { ...item, source_url: event.target.value } : item
+                                        ),
+                                      }))
+                                    }
+                                  />
+                                  <input
+                                    className="input"
+                                    value={row.confidence}
+                                    placeholder="confidence"
+                                    onChange={(event) =>
+                                      setSpecDrafts((current) => ({
+                                        ...current,
+                                        [activeProduct.id]: (current[activeProduct.id] || []).map((item, itemIndex) =>
+                                          itemIndex === index ? { ...item, confidence: event.target.value } : item
+                                        ),
+                                      }))
+                                    }
+                                  />
+                                  <select
+                                    className="input sm:col-span-2"
+                                    value={row.status}
+                                    onChange={(event) =>
+                                      setSpecDrafts((current) => ({
+                                        ...current,
+                                        [activeProduct.id]: (current[activeProduct.id] || []).map((item, itemIndex) =>
+                                          itemIndex === index
+                                            ? { ...item, status: event.target.value as SpecDraftRow["status"] }
+                                            : item
+                                        ),
+                                      }))
+                                    }
+                                  >
+                                    <option value="">Unreviewed</option>
+                                    <option value="needs_review">Needs review</option>
+                                    <option value="approved">Approved</option>
+                                  </select>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </details>
+                      </>
+                    );
+                  })()}
+
+                  <details className="rounded-2xl bg-slate-50 p-4">
+                    <summary className="cursor-pointer font-black">
+                      {activeMeta.missingSpecs.length} missing recommended specs
+                    </summary>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {activeMeta.missingSpecs.map((key) => (
+                        <button
+                          key={key}
+                          type="button"
+                          className="rounded-full bg-white px-3 py-1 text-xs font-black"
+                          onClick={() =>
+                            setSpecDrafts((current) => ({
+                              ...current,
+                              [activeProduct.id]: [
+                                ...(current[activeProduct.id] || []),
+                                {
+                                  key,
+                                  label: formatSpecLabel(key),
+                                  value: "",
+                                  source_url: "",
+                                  confidence: "",
+                                  source_type: "manual_admin_review",
+                                  status: "needs_review",
+                                },
+                              ],
+                            }))
+                          }
+                        >
+                          Add {formatSpecLabel(key)}
+                        </button>
+                      ))}
+                    </div>
+                  </details>
+
+                  <div className="flex flex-wrap gap-3">
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() =>
+                        setSpecDrafts((current) => ({
+                          ...current,
+                          [activeProduct.id]: [
+                            ...(current[activeProduct.id] || []),
+                            {
+                              key: "",
+                              label: "",
+                              value: "",
+                              source_url: "",
+                              confidence: "",
+                              source_type: "manual_admin_review",
+                              status: "needs_review",
+                            },
+                          ],
+                        }))
+                      }
+                    >
+                      Add spec
+                    </button>
+                    <button type="button" className="btn" onClick={() => saveSpecs(activeProduct)} disabled={working}>
+                      Save specs
+                    </button>
+                    <button type="button" className="btn btn-dark" onClick={() => approveAllSpecs(activeProduct)} disabled={working}>
+                      Approve all specs
+                    </button>
+                    <button type="button" className="btn" onClick={() => updateProductStatus(activeProduct, "needs_review")} disabled={working}>
+                      Mark specs needs review
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {activeTab === "image" && (
+                <div className="mt-4 space-y-4">
+                  <div className="h-56 overflow-hidden rounded-2xl bg-slate-100">
+                    <ProductImage
+                      src={imageDrafts[activeProduct.id] || activeProduct.image_url}
+                      category={activeProduct.category}
+                      alt={activeProduct.name}
+                      className="h-full w-full object-cover"
+                    />
+                  </div>
+                  <p className="rounded-2xl bg-slate-50 p-3 text-sm font-bold">
+                    {getImageStatusLabel(activeProduct)}
+                  </p>
+                  {activeProduct.suggested_image_url && (
+                    <button
+                      type="button"
+                      className="text-sm font-black underline"
+                      onClick={() =>
+                        setImageDrafts((current) => ({
+                          ...current,
+                          [activeProduct.id]: activeProduct.suggested_image_url || "",
+                        }))
+                      }
+                    >
+                      Use suggested image candidate
+                    </button>
+                  )}
+                  <input
+                    className="input"
+                    value={imageDrafts[activeProduct.id] || ""}
+                    onChange={(event) =>
+                      setImageDrafts((current) => ({
+                        ...current,
+                        [activeProduct.id]: event.target.value,
+                      }))
+                    }
+                    placeholder="Image URL"
+                  />
+                  <div className="flex flex-wrap gap-3">
+                    <button type="button" className="btn" onClick={() => saveImage(activeProduct)} disabled={working}>
+                      Save image
+                    </button>
+                    <button type="button" className="btn btn-dark" onClick={() => approveProductReview(activeProduct.id, "image")} disabled={working}>
+                      Approve image
+                    </button>
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() =>
+                        setImageDrafts((current) => ({
+                          ...current,
+                          [activeProduct.id]: "",
+                        }))
+                      }
+                    >
+                      Clear image
+                    </button>
+                    <button type="button" className="btn" onClick={() => updateProductStatus(activeProduct, "needs_review")} disabled={working}>
+                      Mark image needs review
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {activeTab === "duplicate" && (
+                <div className="mt-4 space-y-4">
+                  <div className={`rounded-2xl p-4 ${chipClass(activeMeta.duplicateRisk === "High" ? "bad" : activeMeta.duplicateRisk === "Medium" ? "warn" : "good")}`}>
+                    <p className="text-xs font-black uppercase">Duplicate risk</p>
+                    <p className="mt-1 text-xl font-black">{activeMeta.duplicateRisk}</p>
+                  </div>
+                  <input
+                    className="input"
+                    value={duplicateSearches[activeProduct.id] || ""}
+                    onChange={(event) =>
+                      setDuplicateSearches((current) => ({
+                        ...current,
+                        [activeProduct.id]: event.target.value,
+                      }))
+                    }
+                    placeholder="Search manually for duplicate products..."
+                  />
+                  {activeMeta.duplicateCandidates.length === 0 ? (
+                    <p className="rounded-2xl bg-emerald-50 p-4 text-sm font-bold text-emerald-800">
+                      No likely matches in the loaded product set.
+                    </p>
+                  ) : (
+                    <div className="space-y-3">
+                      {activeMeta.duplicateCandidates.map((candidate) => (
+                        <div key={candidate.product.id} className="rounded-2xl border p-3">
+                          <div className="grid grid-cols-[56px_1fr] gap-3">
+                            <div className="h-14 w-14 overflow-hidden rounded-xl bg-slate-100">
+                              <ProductImage
+                                src={candidate.product.image_url}
+                                category={candidate.product.category}
+                                alt={candidate.product.name}
+                                className="h-full w-full object-cover"
+                              />
+                            </div>
+                            <div>
+                              <p className="font-black">{candidate.product.name}</p>
+                              <p className="text-xs font-bold text-muted">
+                                {candidate.product.brand || "Unknown brand"} / {candidate.product.category || "Uncategorized"} / {Math.round(candidate.score * 100)}%
+                              </p>
+                              <div className="mt-2 flex flex-wrap gap-1">
+                                {candidate.reasons.map((reason) => (
+                                  <span key={reason} className="rounded-full bg-amber-50 px-2 py-0.5 text-xs font-black text-amber-800">
+                                    {reason}
+                                  </span>
+                                ))}
+                              </div>
+                              <Link href={`/product/${candidate.product.slug}`} className="mt-2 inline-flex text-xs font-black underline">
+                                View match
+                              </Link>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="flex flex-wrap gap-3">
+                    <button type="button" className="btn btn-dark" onClick={() => approveProductReview(activeProduct.id, "duplicate")} disabled={working}>
+                      Approve duplicate check / Not a duplicate
+                    </button>
+                    <button type="button" className="btn" onClick={() => updateProductStatus(activeProduct, "needs_review")} disabled={working}>
+                      Needs review
+                    </button>
+                    <button type="button" className="btn" onClick={() => updateProductStatus(activeProduct, "rejected")} disabled={working}>
+                      Reject
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {activeTab === "enrichment" && (
+                <div className="mt-4 space-y-4">
+                  <p className="rounded-2xl bg-slate-50 p-3 text-sm font-bold">
+                    {formatEnrichmentStatus(activeProduct.enrichment_status)}
+                  </p>
+                  {activeProduct.enrichment_warnings?.length ? (
+                    <div className="rounded-2xl bg-amber-50 p-3 text-sm font-bold text-amber-900">
+                      {activeProduct.enrichment_warnings.map((warning) => (
+                        <p key={warning}>{warning}</p>
+                      ))}
+                    </div>
+                  ) : null}
+                  {activeProduct.enrichment_sources?.length ? (
+                    <div className="rounded-2xl bg-slate-50 p-3">
+                      <p className="font-black">Enrichment sources</p>
+                      {activeProduct.enrichment_sources.map((source, index) => (
+                        <a
+                          key={`${source.url}-${index}`}
+                          href={source.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="mt-2 block break-all text-sm font-bold underline"
+                        >
+                          {source.title || source.url}
+                        </a>
+                      ))}
+                    </div>
+                  ) : null}
+                  <textarea
+                    className="input min-h-28"
+                    value={sourceNoteDrafts[activeProduct.id] || ""}
+                    onChange={(event) =>
+                      setSourceNoteDrafts((current) => ({
+                        ...current,
+                        [activeProduct.id]: event.target.value,
+                      }))
+                    }
+                    placeholder="Source notes..."
+                  />
+                  <div className="flex flex-wrap gap-3">
+                    <button type="button" className="btn" onClick={() => enrichProduct(activeProduct.id)} disabled={enrichingProductId === activeProduct.id}>
+                      {enrichingProductId === activeProduct.id ? "Running..." : "Run enrichment"}
+                    </button>
+                    <button type="button" className="btn" onClick={() => saveSourceNote(activeProduct)} disabled={working}>
+                      Save source note
+                    </button>
+                    <button type="button" className="btn" onClick={() => updateProductStatus(activeProduct, "needs_review")} disabled={working}>
+                      Mark needs review
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {activeTab === "status" && (
+                <div className="mt-4 space-y-4">
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {[
+                      ["Identity approved", activeProduct.identity_approved_at],
+                      ["Specs approved", activeProduct.specs_approved_at],
+                      ["Image approved", activeProduct.image_approved_at],
+                      ["Duplicate checked", activeProduct.duplicate_reviewed_at],
+                      ["Not rejected", activeProduct.product_verification_status !== "rejected"],
+                      ["Not duplicate", !activeProduct.verified_source || activeProduct.product_verification_status !== "rejected"],
+                    ].map(([label, ok]) => (
+                      <div key={label as string} className="rounded-2xl bg-slate-50 p-3">
+                        <p className="font-black">{label}</p>
+                        <p className={`text-sm font-bold ${ok ? "text-emerald-800" : "text-amber-800"}`}>
+                          {ok ? "Ready" : "Needed"}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                  {!isCatalogReady(activeProduct) && (
+                    <p className="rounded-2xl bg-amber-50 p-3 text-sm font-bold text-amber-900">
+                      {getReadyBlocker(activeProduct)}
+                    </p>
+                  )}
+                  <div className="flex flex-wrap gap-3">
+                    <button
+                      type="button"
+                      className="btn btn-dark"
+                      onClick={() => updateProductStatus(activeProduct, "catalog_verified")}
+                      disabled={working || !isCatalogReady(activeProduct)}
+                    >
+                      Approve as Catalog verified
+                    </button>
+                    <button type="button" className="btn" onClick={() => updateProductStatus(activeProduct, "community_created")} disabled={working}>
+                      Keep as Community-created
+                    </button>
+                    <button type="button" className="btn" onClick={() => updateProductStatus(activeProduct, "needs_review")} disabled={working}>
+                      Mark needs review
+                    </button>
+                    <button type="button" className="btn" onClick={() => updateProductStatus(activeProduct, "rejected")} disabled={working}>
+                      Reject
+                    </button>
+                  </div>
+                </div>
+              )}
+            </section>
+          )}
+        </aside>
       </section>
     </main>
   );

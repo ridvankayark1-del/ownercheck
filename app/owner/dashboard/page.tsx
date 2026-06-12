@@ -168,6 +168,7 @@ export default function OwnerDashboardPage() {
   const [loggedIn, setLoggedIn] = useState(false);
   const [data, setData] = useState<DashboardData | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
+  const [savingDirectId, setSavingDirectId] = useState("");
 
   useEffect(() => {
     async function loadDashboard() {
@@ -289,6 +290,66 @@ export default function OwnerDashboardPage() {
       )
   );
 
+  async function updateDirectRequest(
+    questionId: string,
+    action: "accept" | "decline"
+  ) {
+    setSavingDirectId(questionId);
+    setErrorMessage("");
+
+    const {
+      data: { session },
+      error: sessionError,
+    } = await supabase.auth.getSession();
+
+    if (sessionError || !session?.access_token) {
+      window.location.href = "/auth?redirect=/owner/dashboard";
+      return;
+    }
+
+    const response = await fetch(`/api/owner/direct-questions/${questionId}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${session.access_token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ action }),
+    });
+    const result = (await response.json()) as {
+      chat?: { id: string };
+      error?: string;
+    };
+
+    if (!response.ok) {
+      setSavingDirectId("");
+      setErrorMessage(result.error || `Could not ${action} this request.`);
+      return;
+    }
+
+    if (action === "accept" && result.chat?.id) {
+      window.location.href = `/chats/${result.chat.id}`;
+      return;
+    }
+
+    setData((current) =>
+      current
+        ? {
+            ...current,
+            directQuestions: current.directQuestions.map((question) =>
+              question.id === questionId
+                ? {
+                    ...question,
+                    status: "declined",
+                    declined_at: new Date().toISOString(),
+                  }
+                : question
+            ),
+          }
+        : current
+    );
+    setSavingDirectId("");
+  }
+
   return (
     <main className="mx-auto max-w-6xl px-5 py-12">
       <section className="card p-6">
@@ -306,13 +367,31 @@ export default function OwnerDashboardPage() {
             <Link href="/explore" className="btn">
               Find products
             </Link>
-            <Link href="/direct-requests" className="btn btn-dark">
-              Answer questions
+            <Link href="#owner-workbench" className="btn btn-dark">
+              Open workbench
             </Link>
           </div>
         </div>
 
-        <div className="mt-6 grid gap-4 md:grid-cols-5">
+        <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-6">
+          <div className="rounded-2xl bg-slate-50 p-4">
+            <p className="text-2xl font-black">
+              {openPublicQuestions.length}
+            </p>
+            <p className="text-sm font-bold text-muted">Public questions waiting</p>
+          </div>
+          <div className="rounded-2xl bg-slate-50 p-4">
+            <p className="text-2xl font-black">
+              {pendingDirectQuestions.length}
+            </p>
+            <p className="text-sm font-bold text-muted">Direct requests</p>
+          </div>
+          <div className="rounded-2xl bg-slate-50 p-4">
+            <p className="text-2xl font-black">
+              {activeDirectQuestions.length}
+            </p>
+            <p className="text-sm font-bold text-muted">Active chats</p>
+          </div>
           <div className="rounded-2xl bg-slate-50 p-4">
             <p className="text-2xl font-black">
               {data.profile?.credit_balance ?? 0}
@@ -327,22 +406,135 @@ export default function OwnerDashboardPage() {
           </div>
           <div className="rounded-2xl bg-slate-50 p-4">
             <p className="text-2xl font-black">
-              {data.summary.claimedProductCount}
+              {data.summary.verifiedClaimCount}/{data.summary.claimedProductCount}
             </p>
-            <p className="text-sm font-bold text-muted">Claimed</p>
+            <p className="text-sm font-bold text-muted">Verified claims</p>
           </div>
-          <div className="rounded-2xl bg-slate-50 p-4">
-            <p className="text-2xl font-black">
-              {data.summary.verifiedClaimCount}
-            </p>
-            <p className="text-sm font-bold text-muted">Verified</p>
+        </div>
+      </section>
+
+      <section id="owner-workbench" className="card mt-6 p-6">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="font-bold text-muted">Owner workbench</p>
+            <h2 className="mt-1 text-3xl font-black">Needs your attention</h2>
           </div>
-          <div className="rounded-2xl bg-slate-50 p-4">
-            <p className="text-2xl font-black">
-              {data.summary.unansweredDirectQuestionCount}
-            </p>
-            <p className="text-sm font-bold text-muted">Directs</p>
-          </div>
+          <Link href="/explore" className="btn">
+            Claim another product
+          </Link>
+        </div>
+
+        <div className="mt-5 grid gap-4 lg:grid-cols-3">
+          {pendingDirectQuestions[0] ? (
+            <article className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+              <p className="text-xs font-black uppercase text-amber-800">
+                New direct request
+              </p>
+              <h3 className="mt-2 font-black">
+                {pendingDirectQuestions[0].products?.name || "Unknown product"}
+              </h3>
+              <p className="mt-1 text-sm font-bold text-amber-900">
+                {getBuyerName(pendingDirectQuestions[0].profiles)} /{" "}
+                {formatDate(pendingDirectQuestions[0].created_at)}
+              </p>
+              <p className="mt-3 line-clamp-3 text-sm font-bold">
+                {pendingDirectQuestions[0].question_text}
+              </p>
+              <div className="mt-4 flex flex-wrap gap-3">
+                <Link
+                  href={`/owner/direct-questions/${pendingDirectQuestions[0].id}`}
+                  className="btn"
+                >
+                  Review request
+                </Link>
+                <button
+                  type="button"
+                  className="btn btn-dark"
+                  onClick={() =>
+                    updateDirectRequest(pendingDirectQuestions[0].id, "accept")
+                  }
+                  disabled={savingDirectId === pendingDirectQuestions[0].id}
+                >
+                  Accept
+                </button>
+              </div>
+            </article>
+          ) : (
+            <div className="rounded-2xl bg-slate-50 p-4">
+              <p className="text-xs font-black uppercase text-muted">
+                Direct requests
+              </p>
+              <p className="mt-2 font-bold">
+                No pending private requests right now.
+              </p>
+            </div>
+          )}
+
+          {openPublicQuestions[0] ? (
+            <article className="rounded-2xl border border-slate-200 p-4">
+              <p className="text-xs font-black uppercase text-muted">
+                Open public question
+              </p>
+              <h3 className="mt-2 font-black">
+                {openPublicQuestions[0].products?.name || "Unknown product"}
+              </h3>
+              <p className="mt-1 text-sm font-bold text-muted">
+                {getBuyerName(openPublicQuestions[0].profiles)} /{" "}
+                {formatDate(openPublicQuestions[0].created_at)}
+              </p>
+              <p className="mt-3 line-clamp-3 text-sm font-bold">
+                {openPublicQuestions[0].question_text}
+              </p>
+              <Link
+                href={`/owner/questions/${openPublicQuestions[0].id}`}
+                className="btn btn-dark mt-4"
+              >
+                Answer question
+              </Link>
+            </article>
+          ) : (
+            <div className="rounded-2xl bg-slate-50 p-4">
+              <p className="text-xs font-black uppercase text-muted">
+                Public questions
+              </p>
+              <p className="mt-2 font-bold">
+                No open questions right now.
+              </p>
+            </div>
+          )}
+
+          {activeDirectQuestions[0] ? (
+            <article className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+              <p className="text-xs font-black uppercase text-emerald-800">
+                Active private chat
+              </p>
+              <h3 className="mt-2 font-black">
+                {activeDirectQuestions[0].products?.name || "Unknown product"}
+              </h3>
+              <p className="mt-1 text-sm font-bold text-emerald-900">
+                {getBuyerName(activeDirectQuestions[0].profiles)} /{" "}
+                {formatDate(activeDirectQuestions[0].accepted_at || activeDirectQuestions[0].created_at)}
+              </p>
+              <p className="mt-3 line-clamp-3 text-sm font-bold">
+                {activeDirectQuestions[0].question_text}
+              </p>
+              {activeDirectQuestions[0].chat_id && (
+                <Link
+                  href={`/chats/${activeDirectQuestions[0].chat_id}`}
+                  className="btn btn-dark mt-4"
+                >
+                  Open chat
+                </Link>
+              )}
+            </article>
+          ) : (
+            <div className="rounded-2xl bg-slate-50 p-4">
+              <p className="text-xs font-black uppercase text-muted">
+                Active chats
+              </p>
+              <p className="mt-2 font-bold">No active chat replies waiting.</p>
+            </div>
+          )}
         </div>
       </section>
 
@@ -356,8 +548,8 @@ export default function OwnerDashboardPage() {
                   Products connected to your owner profile.
                 </p>
               </div>
-              <Link href="/add-product" className="btn">
-                Add product
+              <Link href="/explore" className="btn">
+                Find products to claim
               </Link>
             </div>
 
@@ -497,6 +689,9 @@ export default function OwnerDashboardPage() {
                                 Complete verification
                               </Link>
                             )}
+                            <Link href="/my-products" className="btn">
+                              Edit scorecard
+                            </Link>
                           </>
                         )}
                       </div>
@@ -510,7 +705,7 @@ export default function OwnerDashboardPage() {
           <section className="card p-6">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h2 className="text-2xl font-black">Public Questions</h2>
+                <h2 className="text-2xl font-black">Public questions</h2>
                 <p className="mt-1 text-sm font-bold text-muted">
                   Open buyer questions for products you verified.
                 </p>
@@ -590,7 +785,7 @@ export default function OwnerDashboardPage() {
           <section className="card p-6">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h2 className="text-2xl font-black">Direct Requests</h2>
+                <h2 className="text-2xl font-black">Direct chat requests</h2>
                 <p className="mt-1 text-sm font-bold text-muted">
                   Private one-to-one requests sent only to you.
                 </p>
@@ -623,16 +818,40 @@ export default function OwnerDashboardPage() {
                       <p className="mt-3 font-bold">{question.question_text}</p>
 
                       {question.status === "pending" ? (
-                        <div className="mt-4 flex flex-wrap items-center gap-3">
-                          <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-black text-amber-800">
+                        <div className="mt-4 rounded-2xl bg-amber-50 p-4">
+                          <p className="text-xs font-black uppercase text-amber-800">
                             Pending Direct Request
-                          </span>
-                          <Link
-                            href={`/owner/direct-questions/${question.id}`}
-                            className="btn btn-dark"
-                          >
-                            Review request
-                          </Link>
+                          </p>
+                          <div className="mt-3 flex flex-wrap items-center gap-3">
+                            <Link
+                              href={`/owner/direct-questions/${question.id}`}
+                              className="btn"
+                            >
+                              Review request
+                            </Link>
+                            <button
+                              type="button"
+                              className="btn btn-dark"
+                              onClick={() =>
+                                updateDirectRequest(question.id, "accept")
+                              }
+                              disabled={savingDirectId === question.id}
+                            >
+                              {savingDirectId === question.id
+                                ? "Saving..."
+                                : "Accept"}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn"
+                              onClick={() =>
+                                updateDirectRequest(question.id, "decline")
+                              }
+                              disabled={savingDirectId === question.id}
+                            >
+                              Decline
+                            </button>
+                          </div>
                         </div>
                       ) : ["accepted", "answered"].includes(question.status) ? (
                         <div className="mt-4 rounded-2xl bg-emerald-50 p-4">

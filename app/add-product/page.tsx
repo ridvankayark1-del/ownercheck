@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabaseClient";
 
@@ -14,65 +14,49 @@ type Product = {
   description: string | null;
 };
 
-function slugify(value: string) {
-  return value
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
-
-function generateProductData(name: string, brand: string, category: string) {
-  const cleanCategory = category || "Product";
-
-  return {
-    description: `${name} is a ${cleanCategory.toLowerCase()} product. Ask real owners about long-term use, value, durability, setup, and everyday experience before buying.`,
-    ai_summary: `${name} is listed in the ${cleanCategory} category. This page helps buyers collect real-owner answers before making a purchase decision.`,
-    starter_questions: [
-      "What should buyers know before buying this?",
-      "How is it after long-term use?",
-      "What is the biggest problem you noticed?",
-      "Is it worth the price?",
-      "Would you buy it again?",
-    ],
-    evaluation_criteria: [
-      "Build quality",
-      "Ease of use",
-      "Value for money",
-      "Durability",
-      "Long-term satisfaction",
-      "Would buy again",
-    ],
-    search_keywords: [
-      name,
-      brand,
-      category,
-      "real owner review",
-      "buyer questions",
-    ].filter(Boolean),
-  };
-}
+type DuplicateCandidate = Product & {
+  matchType: "exact" | "possible";
+  score: number;
+};
 
 export default function AddProductPage() {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Product[]>([]);
   const [hasSearched, setHasSearched] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [showSubmissionForm, setShowSubmissionForm] = useState(false);
 
   const [newName, setNewName] = useState("");
   const [newBrand, setNewBrand] = useState("");
+  const [newModel, setNewModel] = useState("");
   const [newCategory, setNewCategory] = useState("Headphones");
   const [newImageUrl, setNewImageUrl] = useState("");
   const [sourceUrl, setSourceUrl] = useState("");
   const [creating, setCreating] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+  const [duplicateCandidates, setDuplicateCandidates] = useState<
+    DuplicateCandidate[]
+  >([]);
+  const [canSubmitForReview, setCanSubmitForReview] = useState(false);
+  const [submittedForReview, setSubmittedForReview] = useState(false);
 
-  async function searchProducts() {
+  useEffect(() => {
+    const initialQuery = new URLSearchParams(window.location.search).get("q");
+    if (initialQuery) {
+      setQuery(initialQuery);
+      setNewName(initialQuery);
+      setHasSearched(true);
+      searchProducts(initialQuery);
+    }
+  }, []);
+
+  async function searchProducts(queryOverride?: string) {
     setLoading(true);
     setErrorMessage("");
     setHasSearched(true);
+    setShowSubmissionForm(false);
 
-    const searchText = query.trim();
+    const searchText = (queryOverride || query).trim();
 
     if (!searchText) {
       setResults([]);
@@ -99,68 +83,79 @@ export default function AddProductPage() {
     setLoading(false);
   }
 
-  async function createProduct() {
+  async function createProduct(submitForReview = false) {
     setCreating(true);
     setErrorMessage("");
+    setDuplicateCandidates([]);
+    setCanSubmitForReview(false);
+    setSubmittedForReview(false);
 
     const name = newName.trim() || query.trim();
     const brand = newBrand.trim();
     const category = newCategory.trim();
     const cleanSourceUrl = sourceUrl.trim();
 
-    if (!name) {
-      setErrorMessage("Product name is required.");
+    if (!name || !brand || !category) {
+      setErrorMessage("Product name, brand, and category are required.");
       setCreating(false);
       return;
     }
 
-    const slug = slugify(`${brand ? `${brand} ` : ""}${name}`);
-    const generated = generateProductData(name, brand, category);
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
 
-    const { data, error } = await supabase
-      .from("products")
-      .insert({
-        slug,
+    if (!session) {
+      setErrorMessage("Log in before creating a product page.");
+      setCreating(false);
+      return;
+    }
+
+    const response = await fetch("/api/products", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
         name,
-        brand: brand || null,
-        category: category || null,
-        image_url: newImageUrl.trim() || null,
-        description: generated.description,
-        ai_summary: generated.ai_summary,
-        starter_questions: generated.starter_questions,
-        evaluation_criteria: generated.evaluation_criteria,
-        search_keywords: generated.search_keywords,
-        data_source: "user_created",
-        ai_generated: true,
+        brand,
+        model: newModel.trim(),
+        category,
+        product_url: cleanSourceUrl,
+        image_url: newImageUrl.trim(),
+        submitForReview,
+      }),
+    });
+    const payload = await response.json();
 
-        // Product verification fields
-        product_verification_status: "user_submitted",
-        source_url: cleanSourceUrl || null,
-        verified_source: null,
-        external_product_id: null,
-      })
-      .select("slug")
-      .single();
+    if (!response.ok) {
+      if (response.status === 409 && Array.isArray(payload.candidates)) {
+        setDuplicateCandidates(payload.candidates);
+        setCanSubmitForReview(Boolean(payload.requiresReview));
+      }
 
-    if (error) {
-      setErrorMessage(error.message);
+      setErrorMessage(payload.error || "Could not create product.");
       setCreating(false);
       return;
     }
 
-    window.location.href = `/product/${data.slug}`;
+    if (payload.submission) {
+      window.location.href = "/product-submitted";
+      return;
+    }
+
+    window.location.href = `/product/${payload.product.slug}`;
   }
 
   return (
     <main className="mx-auto max-w-5xl px-5 py-12">
       <p className="font-bold text-muted">Product catalog</p>
-      <h1 className="text-4xl font-black">
-        Search or create a product page
-      </h1>
+      <h1 className="text-4xl font-black">Search or submit a product</h1>
       <p className="mt-3 max-w-2xl text-muted">
-        First search the existing catalog. If the product does not exist, create
-        a new product page. User-submitted products can be reviewed or verified
-        later.
+        This page is for missing products only. Search first, then submit if no
+        existing match is correct. We check for duplicates before any public
+        page is created.
       </p>
 
       <section className="card mt-8 p-6">
@@ -181,7 +176,7 @@ export default function AddProductPage() {
           <button
             type="button"
             className="btn btn-dark"
-            onClick={searchProducts}
+            onClick={() => searchProducts()}
             disabled={loading}
           >
             {loading ? "Searching..." : "Search"}
@@ -252,16 +247,32 @@ export default function AddProductPage() {
               </div>
             ))}
           </div>
+
+          <div className="card mt-6 p-5">
+            <h2 className="text-2xl font-black">Can't find this product?</h2>
+            <p className="mt-2 text-muted">
+              If none of these matches are correct, submit it to OwnerCheck.
+              We will run a stricter duplicate check before creating anything
+              public.
+            </p>
+            <button
+              type="button"
+              className="btn btn-dark mt-4"
+              onClick={() => setShowSubmissionForm(true)}
+            >
+              Submit it to OwnerCheck
+            </button>
+          </div>
         </section>
       )}
 
-      {hasSearched && results.length === 0 && (
+      {hasSearched && (results.length === 0 || showSubmissionForm) && (
         <section className="card mt-8 p-6">
-          <h2 className="text-2xl font-black">No product found</h2>
+          <h2 className="text-2xl font-black">Can't find this product?</h2>
           <p className="mt-2 text-muted">
-            Create a new product page. Add an official product page or retailer
-            URL if you have one. Products without a source URL will be marked as
-            needs review.
+            Submit it to OwnerCheck. If duplicate checks pass, a
+            community-created page appears immediately. If there are likely
+            matches, your submission goes to admin review instead.
           </p>
 
           <div className="mt-6 grid gap-5 md:grid-cols-2">
@@ -282,6 +293,16 @@ export default function AddProductPage() {
                 value={newBrand}
                 onChange={(event) => setNewBrand(event.target.value)}
                 placeholder="Sony"
+              />
+            </div>
+
+            <div>
+              <label className="label">Model or variant optional</label>
+              <input
+                className="input mt-2"
+                value={newModel}
+                onChange={(event) => setNewModel(event.target.value)}
+                placeholder="WH-1000XM5, 13-inch M3, Pro Max..."
               />
             </div>
 
@@ -323,20 +344,84 @@ export default function AddProductPage() {
                 placeholder="https://www.sony.com/... or Amazon/Best Buy product page"
               />
               <p className="mt-2 text-sm text-muted">
-                This helps confirm the product is real. We will use it for
-                manual/API verification later.
+                This helps confirm the product is real. If the page can be
+              Product URL helps us find better specs and images. You can claim
+              ownership after the product is approved or published.
               </p>
             </div>
           </div>
 
+          {duplicateCandidates.length > 0 && (
+            <div className="mt-6 rounded-2xl border border-amber-200 bg-amber-50 p-4">
+              <h3 className="font-black text-amber-900">
+                Possible matching products
+              </h3>
+              <p className="mt-1 text-sm font-bold text-amber-800">
+                Product already exists or may already exist. Choose an existing
+                product when it matches. If this is genuinely different, submit
+                it for admin review.
+              </p>
+              <div className="mt-4 grid gap-3 md:grid-cols-2">
+                {duplicateCandidates.map((product) => (
+                  <div
+                    key={product.id}
+                    className="rounded-2xl border bg-white p-4"
+                  >
+                    <p className="text-xs font-black uppercase tracking-wide text-amber-700">
+                      {product.matchType === "exact"
+                        ? "Likely duplicate"
+                        : `${Math.round(product.score * 100)}% similar`}
+                    </p>
+                    <p className="mt-1 font-black">{product.name}</p>
+                    <p className="text-sm text-muted">
+                      {product.brand || "Unknown brand"} -{" "}
+                      {product.category || "Uncategorized"}
+                    </p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <Link
+                        href={`/product/${product.slug}`}
+                        className="btn btn-dark"
+                      >
+                        View existing product
+                      </Link>
+                      <Link
+                        href={`/product/${product.slug}?claim=1`}
+                        className="btn"
+                      >
+                        I own this product
+                      </Link>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {submittedForReview && (
+            <p className="mt-6 rounded-2xl bg-emerald-50 p-4 text-sm font-black text-emerald-800">
+              Submitted for review. No public product page was created yet.
+            </p>
+          )}
+
           <button
             type="button"
             className="btn btn-dark mt-6"
-            onClick={createProduct}
+            onClick={() => createProduct(false)}
             disabled={creating}
           >
-            {creating ? "Creating..." : "Create product page"}
+            {creating ? "Checking..." : "Submit to OwnerCheck"}
           </button>
+
+          {canSubmitForReview && (
+            <button
+              type="button"
+              className="btn ml-3 mt-6"
+              onClick={() => createProduct(true)}
+              disabled={creating}
+            >
+              Submit for admin review
+            </button>
+          )}
         </section>
       )}
     </main>

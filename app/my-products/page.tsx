@@ -203,8 +203,8 @@ export default function MyProductsPage() {
             If you just claimed a product and still see this, check that the
             claim belongs to the same logged-in account.
           </p>
-          <Link href="/add-product" className="btn btn-dark mt-5">
-            Add product
+          <Link href="/explore" className="btn btn-dark mt-5">
+            Find products to claim
           </Link>
         </div>
       ) : (

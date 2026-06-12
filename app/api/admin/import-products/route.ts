@@ -4,6 +4,10 @@ import {
   requireDatabaseAdmin,
 } from "@/lib/adminAuth";
 import { cleanImageUrl, findProductImage } from "@/lib/productImages";
+import {
+  buildProductIdentity,
+  findDuplicateProducts,
+} from "@/lib/productNormalization";
 
 type ImportProduct = {
   name: string;
@@ -83,6 +87,25 @@ export async function POST(request: NextRequest) {
           category,
         }));
       const generated = generateProductData(name, brand, category);
+      const identity = buildProductIdentity({ name, brand, category });
+      const duplicateCandidates = await findDuplicateProducts(supabase, {
+        name,
+        brand,
+        category,
+      });
+      const exactDuplicate = duplicateCandidates.find(
+        (candidate) => candidate.matchType === "exact"
+      );
+
+      if (exactDuplicate) {
+        rows.push({
+          name,
+          status: "skipped",
+          message: `Exact duplicate of ${exactDuplicate.name}.`,
+          slug: exactDuplicate.slug,
+        });
+        continue;
+      }
 
       const { error } = await supabase.from("products").upsert(
         {
@@ -91,7 +114,39 @@ export async function POST(request: NextRequest) {
           brand: brand || null,
           category,
           image_url: imageUrl,
+          product_url: sourceUrl || null,
           source_url: sourceUrl || null,
+          normalized_title: identity.normalizedTitle,
+          normalized_brand: identity.normalizedBrand || null,
+          normalized_model: identity.normalizedModel || null,
+          canonical_slug: identity.canonicalSlug,
+          aliases: identity.aliases,
+          canonical_title: name,
+          product_type: category,
+          short_summary: generated.ai_summary,
+          key_specs: {},
+          main_features: [],
+          best_for: ["Real-owner buying advice"],
+          common_buyer_concerns: sourceUrl
+            ? []
+            : ["Product details need a stronger source."],
+          source_urls: sourceUrl
+            ? [{ title: "Admin import source", url: sourceUrl }]
+            : [],
+          main_image_url: imageUrl,
+          image_source_url: imageUrl ? "admin_import" : null,
+          image_candidates: imageUrl
+            ? [
+                {
+                  url: imageUrl,
+                  source_url: sourceUrl || "admin_import",
+                  source_type: "submitted",
+                  score: 0.6,
+                },
+              ]
+            : [],
+          image_confidence: imageUrl ? 0.6 : null,
+          enrichment_confidence: sourceUrl ? 0.5 : 0.2,
           product_verification_status: sourceUrl
             ? "catalog_verified"
             : "user_submitted",
@@ -108,7 +163,11 @@ export async function POST(request: NextRequest) {
       rows.push({
         name,
         status: error ? "failed" : "imported",
-        message: error?.message || "Imported.",
+        message:
+          error?.message ||
+          (duplicateCandidates.length > 0
+            ? "Imported with possible duplicate matches for admin review."
+            : "Imported."),
       });
     }
 

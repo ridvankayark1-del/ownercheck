@@ -281,7 +281,19 @@ Shure SM7B,Shure,Microphones,https://images.unsplash.com/photo-1590602847861-f35
           criteria.
         </p>
 
+        <div className="mt-5 rounded-2xl bg-amber-50 p-4 text-sm font-bold text-amber-900">
+          Product Factory is now the recommended workflow for CSV imports. It
+          supports dynamic specs, preview, duplicate review, row editing, and
+          safe bulk publishing.
+          <Link href="/admin/product-factory" className="ml-2 underline">
+            Open Product Factory
+          </Link>
+        </div>
+
         <div className="mt-5 flex flex-wrap gap-3">
+          <Link href="/admin/product-factory" className="btn btn-dark">
+            Product Factory
+          </Link>
           <Link href="/admin/products" className="btn">
             Review products
           </Link>

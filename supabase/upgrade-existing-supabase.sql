@@ -25,10 +25,44 @@ alter table public.products
   add column if not exists search_keywords text[] not null default '{}',
   add column if not exists data_source text not null default 'seed',
   add column if not exists ai_generated boolean not null default false,
+  add column if not exists created_by uuid references auth.users(id) on delete set null,
   add column if not exists product_verification_status text not null default 'user_submitted',
   add column if not exists source_url text,
+  add column if not exists product_url text,
   add column if not exists verified_source text,
   add column if not exists external_product_id text,
+  add column if not exists normalized_title text,
+  add column if not exists normalized_brand text,
+  add column if not exists normalized_model text,
+  add column if not exists canonical_slug text,
+  add column if not exists aliases jsonb not null default '[]'::jsonb,
+  add column if not exists canonical_title text,
+  add column if not exists model text,
+  add column if not exists product_type text,
+  add column if not exists short_summary text,
+  add column if not exists key_specs jsonb not null default '{}'::jsonb,
+  add column if not exists main_features jsonb not null default '[]'::jsonb,
+  add column if not exists best_for jsonb not null default '[]'::jsonb,
+  add column if not exists common_buyer_concerns jsonb not null default '[]'::jsonb,
+  add column if not exists source_urls jsonb not null default '[]'::jsonb,
+  add column if not exists main_image_url text,
+  add column if not exists image_source_url text,
+  add column if not exists image_candidates jsonb not null default '[]'::jsonb,
+  add column if not exists image_confidence numeric(3,2),
+  add column if not exists enrichment_confidence numeric(3,2),
+  add column if not exists category_confidence numeric(3,2),
+  add column if not exists specs_confidence numeric(3,2),
+  add column if not exists identity_approved_at timestamptz,
+  add column if not exists identity_approved_by uuid references public.profiles(id) on delete set null,
+  add column if not exists specs_approved_at timestamptz,
+  add column if not exists specs_approved_by uuid references public.profiles(id) on delete set null,
+  add column if not exists image_approved_at timestamptz,
+  add column if not exists image_approved_by uuid references public.profiles(id) on delete set null,
+  add column if not exists duplicate_reviewed_at timestamptz,
+  add column if not exists duplicate_reviewed_by uuid references public.profiles(id) on delete set null,
+  add column if not exists enriched_at timestamptz,
+  add column if not exists enrichment_error text,
+  add column if not exists duplicate_of_product_id uuid references public.products(id) on delete set null,
   add column if not exists specs jsonb,
   add column if not exists external_summary text,
   add column if not exists external_summary_sources jsonb,
@@ -36,27 +70,42 @@ alter table public.products
   add column if not exists common_complaints jsonb,
   add column if not exists external_review_links jsonb,
   add column if not exists external_summary_updated_at timestamptz,
-  add column if not exists enrichment_status text not null default 'not_enriched';
+  add column if not exists enrichment_status text not null default 'not_enriched',
+  add column if not exists suggested_title text,
+  add column if not exists suggested_brand text,
+  add column if not exists suggested_model text,
+  add column if not exists suggested_category text,
+  add column if not exists suggested_product_type text,
+  add column if not exists suggested_short_summary text,
+  add column if not exists suggested_specs jsonb not null default '{}'::jsonb,
+  add column if not exists suggested_image_url text,
+  add column if not exists enrichment_warnings jsonb not null default '[]'::jsonb,
+  add column if not exists enrichment_sources jsonb not null default '[]'::jsonb;
 
 do $$
 begin
-  if not exists (
+  if exists (
     select 1
     from pg_constraint
     where conname = 'products_product_verification_status_check'
       and conrelid = 'public.products'::regclass
   ) then
     alter table public.products
-      add constraint products_product_verification_status_check
-      check (
-        product_verification_status in (
-          'catalog_verified',
-          'user_submitted',
-          'needs_review',
-          'rejected'
-        )
-      );
+      drop constraint products_product_verification_status_check;
   end if;
+
+  alter table public.products
+    add constraint products_product_verification_status_check
+    check (
+      product_verification_status in (
+        'catalog_verified',
+        'community_created',
+        'user_submitted',
+        'pending_enrichment',
+        'needs_review',
+        'rejected'
+      )
+    );
 end $$;
 
 alter table public.owned_products
@@ -236,6 +285,206 @@ begin
   end if;
 end $$;
 
+create table if not exists public.product_submissions (
+  id uuid primary key default uuid_generate_v4(),
+  submitter_id uuid not null references public.profiles(id) on delete cascade,
+  name text not null,
+  brand text not null,
+  category text not null,
+  model text,
+  product_url text,
+  image_url text,
+  normalized_title text,
+  normalized_brand text,
+  normalized_model text,
+  canonical_slug text,
+  aliases jsonb not null default '[]'::jsonb,
+  duplicate_candidates jsonb not null default '[]'::jsonb,
+  highest_duplicate_score numeric(3,2),
+  enrichment_status text not null default 'not_started',
+  enrichment_error text,
+  status text not null default 'pending_review',
+  linked_product_id uuid references public.products(id) on delete set null,
+  admin_notes text,
+  reviewed_by uuid references public.profiles(id) on delete set null,
+  reviewed_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.product_submissions
+  add column if not exists submitter_id uuid references public.profiles(id) on delete cascade,
+  add column if not exists name text,
+  add column if not exists brand text,
+  add column if not exists category text,
+  add column if not exists model text,
+  add column if not exists product_url text,
+  add column if not exists image_url text,
+  add column if not exists normalized_title text,
+  add column if not exists normalized_brand text,
+  add column if not exists normalized_model text,
+  add column if not exists canonical_slug text,
+  add column if not exists aliases jsonb not null default '[]'::jsonb,
+  add column if not exists duplicate_candidates jsonb not null default '[]'::jsonb,
+  add column if not exists highest_duplicate_score numeric(3,2),
+  add column if not exists enrichment_status text not null default 'not_started',
+  add column if not exists enrichment_error text,
+  add column if not exists status text not null default 'pending_review',
+  add column if not exists linked_product_id uuid references public.products(id) on delete set null,
+  add column if not exists admin_notes text,
+  add column if not exists reviewed_by uuid references public.profiles(id) on delete set null,
+  add column if not exists reviewed_at timestamptz,
+  add column if not exists created_at timestamptz not null default now(),
+  add column if not exists updated_at timestamptz not null default now();
+
+do $$
+begin
+  if exists (
+    select 1
+    from pg_constraint
+    where conname = 'product_submissions_status_check'
+      and conrelid = 'public.product_submissions'::regclass
+  ) then
+    alter table public.product_submissions
+      drop constraint product_submissions_status_check;
+  end if;
+
+  alter table public.product_submissions
+    add constraint product_submissions_status_check
+    check (status in ('pending_review', 'approved', 'rejected', 'duplicate', 'needs_more_info'));
+end $$;
+
+create table if not exists public.product_import_batches (
+  id uuid primary key default gen_random_uuid(),
+  created_by uuid references public.profiles(id) on delete set null,
+  name text not null,
+  source_name text,
+  import_mode text not null default 'csv',
+  status text not null default 'draft',
+  total_rows integer not null default 0,
+  ready_count integer not null default 0,
+  possible_duplicate_count integer not null default 0,
+  failed_count integer not null default 0,
+  published_count integer not null default 0,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.product_import_batches
+  add column if not exists created_by uuid references public.profiles(id) on delete set null,
+  add column if not exists name text,
+  add column if not exists source_name text,
+  add column if not exists import_mode text not null default 'csv',
+  add column if not exists status text not null default 'draft',
+  add column if not exists total_rows integer not null default 0,
+  add column if not exists ready_count integer not null default 0,
+  add column if not exists possible_duplicate_count integer not null default 0,
+  add column if not exists failed_count integer not null default 0,
+  add column if not exists published_count integer not null default 0,
+  add column if not exists created_at timestamptz not null default now(),
+  add column if not exists updated_at timestamptz not null default now();
+
+create table if not exists public.product_import_rows (
+  id uuid primary key default gen_random_uuid(),
+  batch_id uuid not null references public.product_import_batches(id) on delete cascade,
+  row_index integer not null,
+  raw_row jsonb not null default '{}'::jsonb,
+  status text not null default 'parsed',
+  name text,
+  brand text,
+  model text,
+  category text,
+  product_type text,
+  source_name text,
+  source_url text,
+  official_url text,
+  product_url text,
+  image_url_candidate text,
+  short_summary text,
+  specs jsonb not null default '{}'::jsonb,
+  aliases jsonb not null default '[]'::jsonb,
+  duplicate_candidates jsonb not null default '[]'::jsonb,
+  duplicate_risk numeric(3,2) not null default 0,
+  warnings jsonb not null default '[]'::jsonb,
+  linked_product_id uuid references public.products(id) on delete set null,
+  created_product_id uuid references public.products(id) on delete set null,
+  error_message text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.product_import_rows
+  add column if not exists batch_id uuid references public.product_import_batches(id) on delete cascade,
+  add column if not exists row_index integer,
+  add column if not exists raw_row jsonb not null default '{}'::jsonb,
+  add column if not exists status text not null default 'parsed',
+  add column if not exists name text,
+  add column if not exists brand text,
+  add column if not exists model text,
+  add column if not exists category text,
+  add column if not exists product_type text,
+  add column if not exists source_name text,
+  add column if not exists source_url text,
+  add column if not exists official_url text,
+  add column if not exists product_url text,
+  add column if not exists image_url_candidate text,
+  add column if not exists short_summary text,
+  add column if not exists specs jsonb not null default '{}'::jsonb,
+  add column if not exists aliases jsonb not null default '[]'::jsonb,
+  add column if not exists duplicate_candidates jsonb not null default '[]'::jsonb,
+  add column if not exists duplicate_risk numeric(3,2) not null default 0,
+  add column if not exists warnings jsonb not null default '[]'::jsonb,
+  add column if not exists linked_product_id uuid references public.products(id) on delete set null,
+  add column if not exists created_product_id uuid references public.products(id) on delete set null,
+  add column if not exists error_message text,
+  add column if not exists created_at timestamptz not null default now(),
+  add column if not exists updated_at timestamptz not null default now();
+
+do $$
+begin
+  if exists (
+    select 1 from pg_constraint
+    where conname = 'product_import_batches_import_mode_check'
+      and conrelid = 'public.product_import_batches'::regclass
+  ) then
+    alter table public.product_import_batches drop constraint product_import_batches_import_mode_check;
+  end if;
+
+  alter table public.product_import_batches
+    add constraint product_import_batches_import_mode_check
+    check (import_mode in ('csv'));
+
+  if exists (
+    select 1 from pg_constraint
+    where conname = 'product_import_batches_status_check'
+      and conrelid = 'public.product_import_batches'::regclass
+  ) then
+    alter table public.product_import_batches drop constraint product_import_batches_status_check;
+  end if;
+
+  alter table public.product_import_batches
+    add constraint product_import_batches_status_check
+    check (status in ('draft', 'parsed', 'checking_duplicates', 'review_needed', 'partially_published', 'completed', 'failed'));
+
+  if exists (
+    select 1 from pg_constraint
+    where conname = 'product_import_rows_status_check'
+      and conrelid = 'public.product_import_rows'::regclass
+  ) then
+    alter table public.product_import_rows drop constraint product_import_rows_status_check;
+  end if;
+
+  alter table public.product_import_rows
+    add constraint product_import_rows_status_check
+    check (status in ('parsed', 'missing_required_fields', 'duplicate_found', 'possible_duplicate', 'needs_review', 'ready_to_publish', 'published', 'rejected', 'failed'));
+end $$;
+
+create index if not exists product_import_batches_created_at_idx
+  on public.product_import_batches(created_at desc);
+
+create index if not exists product_import_rows_batch_status_idx
+  on public.product_import_rows(batch_id, status);
+
 do $$
 begin
   if not exists (
@@ -352,6 +601,104 @@ as $$
 $$;
 
 grant execute on function public.is_admin() to anon, authenticated;
+
+create or replace function public.apply_product_enrichment(
+  product_id uuid,
+  product_patch jsonb
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  target_product public.products%rowtype;
+begin
+  select *
+  into target_product
+  from public.products
+  where id = product_id
+  for update;
+
+  if target_product.id is null then
+    raise exception 'Product not found.';
+  end if;
+
+  if not public.is_admin()
+    and (
+      auth.uid() is null
+      or target_product.created_by is distinct from auth.uid()
+      or target_product.data_source <> 'user_created'
+    )
+  then
+    raise exception 'Only the product creator or an admin can apply enrichment.';
+  end if;
+
+  perform set_config('ownercheck.secure_credit_flow', 'on', true);
+
+  update public.products
+  set
+    name = coalesce(product_patch->>'name', name),
+    brand = product_patch->>'brand',
+    category = coalesce(product_patch->>'category', category),
+    image_url = product_patch->>'image_url',
+    description = coalesce(product_patch->>'description', description),
+    ai_summary = coalesce(product_patch->>'ai_summary', ai_summary),
+    specs = coalesce(product_patch->'specs', specs),
+    starter_questions = coalesce(
+      array(select jsonb_array_elements_text(product_patch->'starter_questions')),
+      starter_questions
+    ),
+    evaluation_criteria = coalesce(
+      array(select jsonb_array_elements_text(product_patch->'evaluation_criteria')),
+      evaluation_criteria
+    ),
+    search_keywords = coalesce(
+      array(select jsonb_array_elements_text(product_patch->'search_keywords')),
+      search_keywords
+    ),
+    normalized_title = coalesce(product_patch->>'normalized_title', normalized_title),
+    normalized_brand = product_patch->>'normalized_brand',
+    normalized_model = product_patch->>'normalized_model',
+    canonical_slug = coalesce(product_patch->>'canonical_slug', canonical_slug),
+    aliases = coalesce(product_patch->'aliases', aliases),
+    canonical_title = coalesce(product_patch->>'canonical_title', canonical_title),
+    model = product_patch->>'model',
+    product_type = coalesce(product_patch->>'product_type', product_type),
+    short_summary = coalesce(product_patch->>'short_summary', short_summary),
+    key_specs = coalesce(product_patch->'key_specs', key_specs),
+    main_features = coalesce(product_patch->'main_features', main_features),
+    best_for = coalesce(product_patch->'best_for', best_for),
+    common_buyer_concerns = coalesce(product_patch->'common_buyer_concerns', common_buyer_concerns),
+    source_urls = coalesce(product_patch->'source_urls', source_urls),
+    main_image_url = product_patch->>'main_image_url',
+    image_source_url = product_patch->>'image_source_url',
+    image_candidates = coalesce(product_patch->'image_candidates', image_candidates),
+    image_confidence = nullif(product_patch->>'image_confidence', '')::numeric,
+    enrichment_confidence = nullif(product_patch->>'enrichment_confidence', '')::numeric,
+    category_confidence = nullif(product_patch->>'category_confidence', '')::numeric,
+    specs_confidence = nullif(product_patch->>'specs_confidence', '')::numeric,
+    enrichment_status = coalesce(product_patch->>'enrichment_status', enrichment_status),
+    enrichment_error = product_patch->>'enrichment_error',
+    suggested_title = product_patch->>'suggested_title',
+    suggested_brand = product_patch->>'suggested_brand',
+    suggested_model = product_patch->>'suggested_model',
+    suggested_category = product_patch->>'suggested_category',
+    suggested_product_type = product_patch->>'suggested_product_type',
+    suggested_short_summary = product_patch->>'suggested_short_summary',
+    suggested_specs = coalesce(product_patch->'suggested_specs', suggested_specs),
+    suggested_image_url = product_patch->>'suggested_image_url',
+    enrichment_warnings = coalesce(product_patch->'enrichment_warnings', enrichment_warnings),
+    enrichment_sources = coalesce(product_patch->'enrichment_sources', enrichment_sources),
+    enriched_at = coalesce((product_patch->>'enriched_at')::timestamptz, now()),
+    external_summary = coalesce(product_patch->>'external_summary', external_summary),
+    external_summary_sources = coalesce(product_patch->'external_summary_sources', external_summary_sources),
+    external_summary_updated_at = coalesce((product_patch->>'external_summary_updated_at')::timestamptz, external_summary_updated_at)
+  where id = product_id;
+end;
+$$;
+
+grant execute on function public.apply_product_enrichment(uuid, jsonb) to authenticated;
 
 create or replace function public.prevent_non_admin_product_protected_updates()
 returns trigger
@@ -990,6 +1337,9 @@ alter table public.profiles enable row level security;
 alter table public.admin_users enable row level security;
 alter table public.products enable row level security;
 alter table public.owned_products enable row level security;
+alter table public.product_submissions enable row level security;
+alter table public.product_import_batches enable row level security;
+alter table public.product_import_rows enable row level security;
 alter table public.owner_product_ratings enable row level security;
 alter table public.questions enable row level security;
 alter table public.answers enable row level security;
@@ -1004,6 +1354,12 @@ alter table public.reports enable row level security;
 drop policy if exists "Products are public" on public.products;
 drop policy if exists "Visible products are public" on public.products;
 drop policy if exists "Owned products are public" on public.owned_products;
+drop policy if exists "Users can read own product submissions" on public.product_submissions;
+drop policy if exists "Users can submit missing products" on public.product_submissions;
+drop policy if exists "Admins can update product submissions" on public.product_submissions;
+drop policy if exists "Admins can delete product submissions" on public.product_submissions;
+drop policy if exists "Admins can manage product import batches" on public.product_import_batches;
+drop policy if exists "Admins can manage product import rows" on public.product_import_rows;
 drop policy if exists "Owner product ratings are public" on public.owner_product_ratings;
 drop policy if exists "Questions are public" on public.questions;
 drop policy if exists "Answers are public" on public.answers;
@@ -1078,11 +1434,12 @@ create policy "Visible products are public" on public.products for select using 
 -- Authenticated users can submit new products only into the user-submitted review state.
 create policy "Authenticated users can submit user products" on public.products for insert with check (
   auth.uid() is not null
-  and product_verification_status = 'user_submitted'
+  and product_verification_status in ('user_submitted', 'community_created', 'pending_enrichment')
   and coalesce(data_source, 'user_submitted') in ('user_submitted', 'user_created')
+  and (created_by is null or created_by = auth.uid())
   and verified_source is null
   and external_product_id is null
-  and enrichment_status = 'not_enriched'
+  and enrichment_status in ('not_enriched', 'pending')
 );
 
 -- Admins can insert curated/imported products.
@@ -1096,6 +1453,24 @@ create policy "Admins can delete products" on public.products for delete using (
 
 -- Ownership claims are public metadata for product pages; verification photo access is handled by storage policies.
 create policy "Owned products are public" on public.owned_products for select using (true);
+
+create policy "Users can read own product submissions" on public.product_submissions for select using (
+  submitter_id = auth.uid() or public.is_admin()
+);
+
+create policy "Users can submit missing products" on public.product_submissions for insert with check (
+  auth.uid() is not null
+  and submitter_id = auth.uid()
+  and status = 'pending_review'
+);
+
+create policy "Admins can update product submissions" on public.product_submissions for update using (public.is_admin()) with check (public.is_admin());
+
+create policy "Admins can delete product submissions" on public.product_submissions for delete using (public.is_admin());
+
+create policy "Admins can manage product import batches" on public.product_import_batches for all using (public.is_admin()) with check (public.is_admin());
+
+create policy "Admins can manage product import rows" on public.product_import_rows for all using (public.is_admin()) with check (public.is_admin());
 
 -- Users can create their own basic ownership claim in an unverified/submitted state.
 create policy "Users can claim owned products" on public.owned_products for insert with check (

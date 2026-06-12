@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabaseClient";
+import { ProductImage } from "@/components/ProductImage";
 
 type ChatDetail = {
   id: string;
@@ -17,6 +18,8 @@ type ChatDetail = {
     slug: string;
     name: string;
     brand: string | null;
+    category: string | null;
+    image_url: string | null;
   } | null;
   direct_questions: {
     question_text: string;
@@ -177,13 +180,17 @@ export default function ChatPage({ params }: PageProps) {
     await loadChat(chatId);
   }
 
-  const participantNames = useMemo(() => {
-    if (!data) return "";
-
-    return data.participants
-      .map((participant) => getName(participant.profiles, participant.role))
-      .join(" and ");
-  }, [data]);
+  const viewerIsOwner = data?.viewer.id === data?.chat.owner_id;
+  const backHref = viewerIsOwner ? "/owner/dashboard" : "/profile";
+  const backLabel = viewerIsOwner ? "Back to dashboard" : "Back to my directs";
+  const buyerParticipant = data?.participants.find(
+    (participant) => participant.role === "buyer"
+  );
+  const ownerParticipant = data?.participants.find(
+    (participant) => participant.role === "owner"
+  );
+  const buyerName = getName(buyerParticipant?.profiles || null, "Buyer");
+  const ownerName = getName(ownerParticipant?.profiles || null, "Owner");
 
   if (loading) {
     return (
@@ -230,84 +237,128 @@ export default function ChatPage({ params }: PageProps) {
   }
 
   return (
-    <main className="mx-auto max-w-4xl px-5 py-12">
-      <section className="card p-6">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <p className="font-bold text-muted">Private Chat</p>
-            <h1 className="mt-2 text-3xl font-black">
-              {data.chat.products?.name || "Direct request"}
-            </h1>
-            <p className="mt-2 text-sm font-bold text-muted">
-              {participantNames}
-            </p>
+    <main className="mx-auto max-w-5xl px-5 py-12">
+      <section className="card overflow-hidden p-0">
+        <div className="border-b bg-white p-5 md:p-6">
+          <div className="flex flex-col gap-5 md:flex-row md:items-center md:justify-between">
+            <div className="flex gap-4">
+              <div className="h-24 w-24 shrink-0 overflow-hidden rounded-2xl bg-slate-100 md:h-28 md:w-28">
+                {data.chat.products ? (
+                  <ProductImage
+                    src={data.chat.products.image_url}
+                    category={data.chat.products.category}
+                    alt={data.chat.products.name}
+                    className="h-full w-full object-cover"
+                  />
+                ) : (
+                  <div className="flex h-full items-center justify-center text-xs font-black text-muted">
+                    Product
+                  </div>
+                )}
+              </div>
+              <div>
+                <p className="font-bold text-muted">Private Chat</p>
+                <h1 className="mt-1 text-3xl font-black leading-tight">
+                  {data.chat.products?.name || "Direct request"}
+                </h1>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-black text-emerald-800">
+                    Private chat with verified owner
+                  </span>
+                  <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
+                    Buyer: {buyerName}
+                  </span>
+                  <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
+                    Owner: {ownerName}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-3">
+              {data.chat.products?.slug && (
+                <Link href={`/product/${data.chat.products.slug}`} className="btn">
+                  View product
+                </Link>
+              )}
+              <Link href={backHref} className="btn btn-dark">
+                {backLabel}
+              </Link>
+            </div>
           </div>
 
-          {data.chat.products?.slug && (
-            <Link href={`/product/${data.chat.products.slug}`} className="btn">
-              View product
-            </Link>
+          {data.chat.direct_questions?.question_text && (
+            <div className="mt-5 rounded-2xl bg-slate-50 p-4">
+              <p className="text-xs font-black uppercase text-muted">
+                Original direct request
+              </p>
+              <p className="mt-2 text-sm font-bold leading-6 text-slate-700">
+                {data.chat.direct_questions.question_text}
+              </p>
+            </div>
           )}
         </div>
 
-        {data.chat.direct_questions?.question_text && (
-          <div className="mt-5 rounded-2xl bg-slate-50 p-4">
-            <p className="text-xs font-black uppercase text-muted">
-              Direct Request
-            </p>
-            <p className="mt-2 font-bold">
-              {data.chat.direct_questions.question_text}
-            </p>
-          </div>
-        )}
-
-        <div className="mt-6 space-y-4">
+        <div className="space-y-5 bg-slate-50 p-4 md:p-6">
           {data.messages.map((item) => {
             const sentByViewer = item.sender_id === data.viewer.id;
 
             return (
-              <article
+              <div
                 key={item.id}
-                className={`rounded-2xl p-4 ${
-                  sentByViewer ? "bg-black text-white" : "bg-slate-50"
-                }`}
+                className={`flex ${sentByViewer ? "justify-end" : "justify-start"}`}
               >
-                <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-black">
-                  <span>{sentByViewer ? "You" : getName(item.profiles, "Participant")}</span>
-                  <span className={sentByViewer ? "text-slate-300" : "text-muted"}>
-                    {formatTime(item.created_at)}
-                  </span>
-                </div>
-                <p className="mt-2 whitespace-pre-wrap leading-7">
-                  {item.message_text}
-                </p>
-              </article>
+                <article
+                  className={`max-w-[82%] rounded-2xl px-4 py-3 shadow-sm md:max-w-[70%] ${
+                    sentByViewer
+                      ? "rounded-br-md bg-black text-white"
+                      : "rounded-bl-md bg-white"
+                  }`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-3 text-xs font-black">
+                    <span>
+                      {sentByViewer ? "You" : getName(item.profiles, "Participant")}
+                    </span>
+                    <span className={sentByViewer ? "text-slate-300" : "text-muted"}>
+                      {formatTime(item.created_at)}
+                    </span>
+                  </div>
+                  <p className="mt-2 whitespace-pre-wrap leading-7">
+                    {item.message_text}
+                  </p>
+                </article>
+              </div>
             );
           })}
         </div>
 
         {message && (
-          <p className="mt-5 rounded-2xl bg-slate-100 p-4 text-sm font-bold">
+          <p className="mx-5 mt-5 rounded-2xl bg-slate-100 p-4 text-sm font-bold">
             {message}
           </p>
         )}
 
-        <div className="mt-6">
+        <div className="border-t bg-white p-5 md:p-6">
           <label className="label">Message</label>
           <textarea
-            className="input mt-2 min-h-32"
+            className="input mt-2 min-h-28"
             value={messageText}
             onChange={(event) => setMessageText(event.target.value)}
-            placeholder="Write a private message..."
+            placeholder="Write a private reply about ownership, fit, usage, or buying advice..."
           />
-          <button
-            type="button"
-            className="btn btn-dark mt-4"
-            onClick={sendMessage}
-            disabled={saving}
-          >
-            {saving ? "Sending..." : "Send message"}
-          </button>
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+            <p className="text-xs font-bold text-muted">
+              Only the buyer and selected owner can view this chat.
+            </p>
+            <button
+              type="button"
+              className="btn btn-dark"
+              onClick={sendMessage}
+              disabled={saving}
+            >
+              {saving ? "Sending..." : "Send message"}
+            </button>
+          </div>
         </div>
       </section>
     </main>

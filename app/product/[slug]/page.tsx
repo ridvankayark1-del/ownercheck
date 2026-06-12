@@ -5,6 +5,7 @@ import { AskQuestionForm } from "@/components/AskQuestionForm";
 import { ClaimProductModal } from "@/components/ClaimProductModal";
 import { DirectQuestionForm } from "@/components/DirectQuestionForm";
 import { HelpfulButton } from "@/components/HelpfulButton";
+import { OwnerTrustCard } from "@/components/OwnerTrustCard";
 import { ProductImage } from "@/components/ProductImage";
 import { getCategoryProfile } from "@/lib/productCategoryProfiles";
 import { getOwnerEvaluationCriteria } from "@/lib/ownerEvaluationCriteria";
@@ -212,9 +213,17 @@ function getProfileName(profile?: Profile) {
 
 function getProductVerificationLabel(status?: string | null) {
   if (status === "catalog_verified") return "Catalog verified";
+  if (status === "community_created") return "Community-created";
+  if (status === "pending_enrichment") return "Community-created";
   if (status === "needs_review") return "Needs review";
   if (status === "rejected") return "Rejected";
   return "User-submitted product";
+}
+
+function isKnownAirPods3(name?: string | null, brand?: string | null) {
+  return /airpods\s*3|airpods\s*\(?3rd generation\)?/i.test(
+    `${brand || ""} ${name || ""}`
+  );
 }
 
 export default async function ProductPage({ params, searchParams }: PageProps) {
@@ -225,7 +234,7 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
   const { data: product, error } = await supabase
     .from("products")
     .select(
-      "id, slug, name, brand, category, image_url, description, ai_summary, specs, external_summary, common_praise, common_complaints, external_review_links, external_summary_sources, starter_questions, evaluation_criteria, product_verification_status, source_url, verified_source"
+      "id, slug, name, canonical_title, brand, category, image_url, description, ai_summary, short_summary, specs, external_summary, common_praise, common_complaints, external_review_links, external_summary_sources, starter_questions, evaluation_criteria, product_verification_status, enrichment_status, enrichment_confidence, category_confidence, specs_confidence, identity_approved_at, specs_approved_at, image_approved_at, duplicate_reviewed_at, source_url, verified_source"
     )
     .eq("slug", slug)
     .single();
@@ -305,16 +314,39 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
     product.external_summary_sources
   );
   const productSpecs = getProductSpecs(product.specs);
+  const airPods3 = isKnownAirPods3(
+    product.canonical_title || product.name,
+    product.brand
+  );
+  const categoryConfidence = Number(product.category_confidence || 0);
+  const specsConfidence = Number(
+    product.specs_confidence || product.enrichment_confidence || 0
+  );
+  const displayName = airPods3
+    ? "Apple AirPods (3rd generation)"
+    : product.canonical_title || product.name;
+  const displayBrand = airPods3 ? "Apple" : product.brand;
+  const displayCategory = airPods3
+    ? "Headphones"
+    : categoryConfidence >= 0.5 || product.identity_approved_at
+      ? cleanOptionalSpec(productSpecs?.category) ||
+        cleanDisplayText(product.category || "")
+      : cleanDisplayText(product.category || "");
+  const displayProductType = airPods3
+    ? "Wireless earbuds"
+    : specsConfidence >= 0.5 || product.specs_approved_at
+      ? cleanOptionalSpec(productSpecs?.product_type)
+      : null;
   const categoryProfile = getCategoryProfile(
-    productSpecs?.category || product.category
+    displayCategory || product.category
   );
   const simpleSpecEntries = productSpecs
     ? getSimpleSpecEntries(productSpecs)
     : [];
   const baseSnapshotItems = [
-    ["Brand", cleanOptionalSpec(productSpecs?.brand) || cleanDisplayText(product.brand || "")],
-    ["Category", cleanOptionalSpec(productSpecs?.category) || cleanDisplayText(product.category || "")],
-    ["Product type", cleanOptionalSpec(productSpecs?.product_type)],
+    ["Brand", displayBrand || cleanOptionalSpec(productSpecs?.brand) || ""],
+    ["Category", displayCategory],
+    ["Product type", displayProductType],
     ["Model", cleanOptionalSpec(productSpecs?.model)],
   ];
   const categorySnapshotItems = productSpecs
@@ -331,7 +363,9 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
   );
   const bestFor = getStringList(productSpecs?.best_for || productSpecs?.use_cases || []);
   const checkBeforeBuying = getStringList(productSpecs?.check_before_buying);
-  const overviewSentences = splitSentences(product.ai_summary);
+  const overviewSentences = splitSentences(
+    product.short_summary || product.ai_summary
+  );
   const externalSourceLinks = [
     ...(product.source_url
       ? [
@@ -371,6 +405,18 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
           userId: ownedProduct.user_id as string,
           name: getProfileName(ownerProfile),
           ownerLevel: getOwnerLevelLabel(ownerLevel),
+          ownershipMonths: ownedProduct.ownership_months,
+          rating: ownedProduct.rating,
+          scorecardRating:
+            ((ownerProductRatings || []) as OwnerProductRating[]).find(
+              (rating) =>
+                rating.owned_product_id === ownedProduct.id ||
+                rating.user_id === ownedProduct.user_id
+            )?.overall_rating || null,
+          answerCount: getOwnerHelpfulActivity(ownedProduct.user_id).answerCount,
+          helpfulCount: getOwnerHelpfulActivity(ownedProduct.user_id)
+            .helpfulCount,
+          photoVerified: ownedProduct.verification_status === "photo_verified",
         };
       }) || [];
 
@@ -379,6 +425,40 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
       (ownedProduct: OwnedProduct) =>
         ownedProduct.verification_status === "photo_verified"
     ).length || 0;
+  const identityApproved = Boolean(
+    product.identity_approved_at ||
+      product.product_verification_status === "catalog_verified"
+  );
+  const specsApproved = Boolean(
+    product.specs_approved_at && specsConfidence >= 0.5
+  );
+  const imageApproved = Boolean(product.image_approved_at);
+  const duplicateReviewed = Boolean(
+    product.duplicate_reviewed_at || product.verified_source
+  );
+  const fullyCatalogVerified = Boolean(
+    product.product_verification_status === "catalog_verified" &&
+      identityApproved &&
+      specsApproved &&
+      imageApproved &&
+      duplicateReviewed
+  );
+  const catalogPageApproved = Boolean(
+    product.product_verification_status === "catalog_verified" &&
+      !fullyCatalogVerified
+  );
+  const isCommunityCreated = [
+    "community_created",
+    "pending_enrichment",
+    "user_submitted",
+  ].includes(product.product_verification_status || "");
+  const isProductInfoPending =
+    isCommunityCreated ||
+    ["pending", "running", "pending_review", "failed"].includes(
+      product.enrichment_status || ""
+    ) ||
+    !specsApproved ||
+    categoryConfidence < 0.5;
 
   const ratings =
     ownedProducts
@@ -393,7 +473,7 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
       : null;
 
   const scorecardCriteria = getOwnerEvaluationCriteria(
-    productSpecs?.category || product.category
+    displayCategory || product.category
   );
   const scorecardRatings = ((ownerProductRatings || []) as OwnerProductRating[])
     .filter((rating) => rating.criteria_scores && rating.overall_rating)
@@ -444,6 +524,12 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
     questions?.filter((question: Question) =>
       question.status === "answered" || getAnswersForQuestion(question.id).length > 0
     ).length || 0;
+  const mostHelpfulAnswer = [...(answers || [])].sort(
+    (first, second) => second.helpful_count - first.helpful_count
+  )[0];
+  const mostHelpfulOwner = mostHelpfulAnswer?.owner_id
+    ? profileMap.get(mostHelpfulAnswer.owner_id)
+    : undefined;
 
   function getAnswersForQuestion(questionId: string) {
     return (answers || []).filter(
@@ -472,54 +558,94 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
         ← Back to explore
       </Link>
 
-      <section className="card mt-4 overflow-hidden p-4 md:p-5">
-        <div className="grid gap-5 lg:grid-cols-[320px_1fr]">
-          <div className="overflow-hidden rounded-2xl bg-slate-100">
+      <section className="card mt-4 overflow-hidden p-4 md:p-6">
+        <div className="grid gap-6 lg:grid-cols-[420px_1fr] lg:items-stretch">
+          <div className="overflow-hidden rounded-2xl bg-slate-100 shadow-sm">
             <ProductImage
               src={product.image_url}
               category={product.category}
               alt={product.name}
-              className="h-60 w-full object-cover lg:h-full"
+              className="h-72 w-full object-cover sm:h-96 lg:h-full"
             />
           </div>
 
-          <div className="flex flex-col justify-between gap-5">
+          <div className="flex flex-col justify-between gap-6 py-1">
             <div>
+              <div className="hidden">
               <div className="flex flex-wrap items-center gap-2">
                 <p className="text-sm font-bold text-muted">
                   {product.brand || "Unknown brand"} ·{" "}
                   {product.category || "Uncategorized"}
                   {productSpecs?.product_type ? ` · ${productSpecs.product_type}` : ""}
                 </p>
-                <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
+                <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-black text-emerald-800">
                   {getProductVerificationLabel(product.product_verification_status)}
                 </span>
+                {isProductInfoPending && (
+                  <span className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-black text-amber-800">
+                    Specs being verified
+                  </span>
+                )}
+              </div>
               </div>
 
-              <h1 className="mt-2 text-3xl font-black leading-tight md:text-5xl">
-                {product.name}
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-sm font-bold text-muted">
+                  {displayBrand || "Unknown brand"} ·{" "}
+                  {displayCategory || "Uncategorized"}
+                  {displayProductType ? ` · ${displayProductType}` : ""}
+                </p>
+                <span
+                  className={`rounded-full border px-3 py-1 text-xs font-black ${
+                    fullyCatalogVerified
+                      ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                      : "border-slate-200 bg-slate-50 text-slate-700"
+                  }`}
+                >
+                  {fullyCatalogVerified
+                    ? "Catalog verified"
+                    : catalogPageApproved
+                      ? "Catalog page approved"
+                      : getProductVerificationLabel(product.product_verification_status)}
+                </span>
+                {isProductInfoPending && (
+                  <span className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-black text-amber-800">
+                    {isCommunityCreated
+                      ? "Info being verified"
+                      : "Specs being verified"}
+                  </span>
+                )}
+              </div>
+
+              <h1 className="mt-3 text-4xl font-black leading-tight md:text-6xl">
+                {displayName}
               </h1>
 
-              <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
                 {[
-                  ["Owners", ownerCount > 0 ? ownerCount : "No owners yet"],
                   [
-                    "Verified",
-                    photoVerifiedCount > 0
-                      ? photoVerifiedCount
-                      : "No verified owners yet",
+                    "Verified owners",
+                    photoVerifiedCount,
                   ],
-                  ["Rating", averageRating || "No rating yet"],
-                  ["Questions", questions?.length || 0],
+                  ["Owner answers", answers?.length || 0],
+                  ["Owner rating", averageRating || "No rating"],
+                  ["Public questions", questions?.length || 0],
                 ].map(([label, value]) => (
-                  <div key={label} className="rounded-2xl bg-slate-50 p-3">
-                    <p className="text-lg font-black">{value}</p>
+                  <div key={label} className="rounded-2xl border bg-white p-4">
+                    <p className="text-2xl font-black">{value}</p>
                     <p className="text-xs font-bold text-muted">{label}</p>
                   </div>
                 ))}
               </div>
 
               <div className="mt-4 space-y-2 leading-7 text-muted">
+                {isProductInfoPending && (
+                  <p className="font-bold text-amber-800">
+                    {isCommunityCreated
+                      ? "Basic product info is being verified."
+                      : "Catalog identity is approved, but specs are still being verified."}
+                  </p>
+                )}
                 {(overviewSentences.length > 0
                   ? overviewSentences.slice(0, 2)
                   : [
@@ -533,22 +659,55 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
               </div>
             </div>
 
-            <div className="flex flex-col gap-3 sm:flex-row">
-              <a href="#ask-question" className="btn btn-dark w-full sm:w-auto">
-                Ask owners a question
-              </a>
-              <ClaimProductModal
-                productId={product.id}
-                productSlug={product.slug}
-                category={product.category}
-                triggerClassName="btn w-full sm:w-auto"
-                defaultOpen={shouldOpenClaim}
-              />
-              {externalSourceLinks.length > 0 && (
-                <a href="#external-sources" className="btn w-full sm:w-auto">
-                  View sources
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-col gap-3 sm:flex-row">
+                <a
+                  href="#ask-question"
+                  className="btn btn-dark w-full justify-center sm:w-auto"
+                >
+                  Ask public question
                 </a>
+                {directOwnerOptions.length > 0 ? (
+                  <a
+                    href="#ask-question"
+                    className="btn btn-dark w-full justify-center sm:w-auto"
+                  >
+                    Start private chat
+                  </a>
+                ) : (
+                  <span className="btn w-full cursor-not-allowed justify-center opacity-60 sm:w-auto">
+                    Private chat unavailable
+                  </span>
+                )}
+              </div>
+              {directOwnerOptions.length === 0 && (
+                <p className="text-sm font-bold text-muted">
+                  Private chat becomes available when a verified owner claims
+                  this product.
+                </p>
               )}
+              <div className="flex flex-col gap-3 sm:flex-row">
+                <ClaimProductModal
+                  productId={product.id}
+                  productSlug={product.slug}
+                  category={product.category}
+                  triggerClassName="btn w-full justify-center sm:w-auto"
+                  triggerLabel={
+                    photoVerifiedCount === 0
+                      ? "Become the first verified owner"
+                      : "I own this product"
+                  }
+                  defaultOpen={shouldOpenClaim}
+                />
+                {externalSourceLinks.length > 0 && (
+                  <a
+                    href="#external-sources"
+                    className="btn w-full justify-center text-muted sm:w-auto"
+                  >
+                    View sources
+                  </a>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -646,24 +805,63 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
             </section>
           )}
 
-          <section id="ask-question" className="card p-5">
-            <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
+          <section id="ask-question">
+            <div className="mb-4">
+              <h2 className="text-2xl font-black">Ask real owners</h2>
+              <p className="mt-2 max-w-2xl leading-7 text-muted">
+                Pick the public route when many buyers could use the answer, or
+                start a private chat when your question is specific to your own
+                situation.
+              </p>
+            </div>
+
+            <div className="grid gap-5 lg:grid-cols-2">
+              <AskQuestionForm
+                productId={product.id}
+                starterQuestions={starterQuestions}
+              />
+              <DirectQuestionForm
+                productId={product.id}
+                ownerOptions={directOwnerOptions}
+              />
+            </div>
+          </section>
+
+          <section className="card p-5">
+            <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
-                <h2 className="text-2xl font-black">Ask real owners</h2>
-                <p className="mt-2 leading-7 text-muted">
-                  Ask about comfort, battery life, durability, setup, long-term
-                  use, or anything reviews did not answer.
+                <p className="font-bold text-muted">Owner insight</p>
+                <h2 className="mt-1 text-2xl font-black">
+                  What owners are saying
+                </h2>
+              </div>
+              <span className="trust-badge trust-badge-neutral">
+                Real-owner signals
+              </span>
+            </div>
+
+            {mostHelpfulAnswer ? (
+              <div className="mt-4 rounded-2xl bg-[var(--surface-soft)] p-4">
+                <p className="text-sm font-black text-muted">
+                  Most helpful answer by {getProfileName(mostHelpfulOwner)}
+                </p>
+                <p className="mt-2 line-clamp-3 leading-7">
+                  {mostHelpfulAnswer.answer_text}
+                </p>
+                <p className="mt-3 text-sm font-bold text-muted">
+                  {mostHelpfulAnswer.helpful_count} helpful votes
                 </p>
               </div>
-
-              <div className="space-y-4 [&_.card]:bg-slate-50 [&_.card]:p-4 [&_h2]:text-xl">
-                <AskQuestionForm productId={product.id} />
-                <DirectQuestionForm
-                  productId={product.id}
-                  ownerOptions={directOwnerOptions}
-                />
+            ) : (
+              <div className="mt-4 rounded-2xl bg-[var(--surface-soft)] p-4">
+                <p className="font-bold">
+                  No owner insights yet. Ask the first question.
+                </p>
+                <a href="#ask-question" className="btn btn-dark mt-3">
+                  Ask a public question
+                </a>
               </div>
-            </div>
+            )}
           </section>
 
           <section className="card p-5">
@@ -675,7 +873,7 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
                 </p>
               </div>
               <a href="#ask-question" className="btn btn-dark">
-                Ask the first question
+                Ask a question
               </a>
             </div>
 
@@ -695,12 +893,38 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
                     : undefined;
 
                   return (
-                    <div key={question.id} className="rounded-2xl border p-4">
+                    <div
+                      key={question.id}
+                      className={`rounded-2xl border p-4 ${
+                        questionAnswers.length > 0
+                          ? "border-emerald-200 bg-emerald-50/30"
+                          : "border-amber-200 bg-amber-50/30"
+                      }`}
+                    >
                       <p className="font-black">{question.question_text}</p>
                       <p className="mt-2 text-sm text-muted">
                         Asked by {getProfileName(buyerProfile)} · Reward:{" "}
                         {question.credit_reward} credits · {question.status}
                       </p>
+
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <span
+                          className={`rounded-full px-3 py-1 text-xs font-black ${
+                            questionAnswers.length > 0
+                              ? "bg-emerald-100 text-emerald-800"
+                              : "bg-amber-100 text-amber-800"
+                          }`}
+                        >
+                          {questionAnswers.length > 0
+                            ? "Answered"
+                            : "Waiting for verified owner"}
+                        </span>
+                        {questionAnswers.length === 0 && (
+                          <span className="text-sm font-bold text-amber-900">
+                            Waiting for a verified owner answer.
+                          </span>
+                        )}
+                      </div>
 
                       {questionAnswers.length > 0 && (
                         <div className="mt-4 space-y-3">
@@ -716,24 +940,47 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
                               answerOwnedProduct?.verification_status,
                               answerProfile?.trust_score
                             );
+                            const answerOwnerActivity = getOwnerHelpfulActivity(
+                              answer.owner_id
+                            );
+                            const answerOwnerRating = (
+                              (ownerProductRatings || []) as OwnerProductRating[]
+                            ).find(
+                              (rating) =>
+                                rating.owned_product_id ===
+                                  answerOwnedProduct?.id ||
+                                rating.user_id === answer.owner_id
+                            );
 
                             return (
                               <div
                                 key={answer.id}
-                                className="rounded-2xl bg-slate-50 p-4"
+                                className="rounded-2xl bg-white p-4"
                               >
-                                <div className="flex flex-wrap items-center gap-2 text-xs font-black">
-                                  <span>
-                                    Answered by {getProfileName(answerProfile)}
-                                  </span>
-                                  <span
-                                    className={`rounded-full px-3 py-1 ${getOwnerLevelBadgeClass(
-                                      answerOwnerLevel
-                                    )}`}
-                                  >
-                                    {getOwnerLevelLabel(answerOwnerLevel)}
-                                  </span>
-                                </div>
+                                <OwnerTrustCard
+                                  name={getProfileName(answerProfile)}
+                                  ownerLevel={getOwnerLevelLabel(
+                                    answerOwnerLevel
+                                  )}
+                                  photoVerified={
+                                    answerOwnedProduct?.verification_status ===
+                                    "photo_verified"
+                                  }
+                                  ownershipMonths={
+                                    answerOwnedProduct?.ownership_months
+                                  }
+                                  rating={answerOwnedProduct?.rating}
+                                  scorecardRating={
+                                    answerOwnerRating?.overall_rating
+                                  }
+                                  answerCount={
+                                    answerOwnerActivity.answerCount
+                                  }
+                                  helpfulCount={
+                                    answerOwnerActivity.helpfulCount
+                                  }
+                                  compact
+                                />
                                 <p className="mt-3 leading-7">{answer.answer_text}</p>
                                 <HelpfulButton
                                   answerId={answer.id}
@@ -747,12 +994,14 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
                       )}
 
                       {questionAnswers.length === 0 && (
-                        <Link
-                          href={`/owner/questions/${question.id}`}
-                          className="btn btn-dark mt-4"
-                        >
-                          Answer question
-                        </Link>
+                        <div className="mt-4 flex flex-wrap items-center gap-3">
+                          <Link
+                            href={`/owner/questions/${question.id}`}
+                            className="btn btn-dark"
+                          >
+                            Answer question
+                          </Link>
+                        </div>
                       )}
                     </div>
                   );
@@ -778,17 +1027,35 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
                     ownedProduct.verification_status,
                     ownerProfile?.trust_score
                   );
-                  const helpfulActivity = getOwnerHelpfulActivity(
-                    ownedProduct.user_id
-                  );
+	                  const helpfulActivity = getOwnerHelpfulActivity(
+	                    ownedProduct.user_id
+	                  );
+                    const ownerRating = (
+                      (ownerProductRatings || []) as OwnerProductRating[]
+                    ).find(
+                      (rating) =>
+                        rating.owned_product_id === ownedProduct.id ||
+                        rating.user_id === ownedProduct.user_id
+                    );
 
-                  return (
-                    <div key={ownedProduct.id} className="rounded-2xl border p-4">
-                      <p className="text-sm font-bold text-muted">
-                        Owner review by {getProfileName(ownerProfile)}
-                      </p>
+	                  return (
+	                    <div key={ownedProduct.id} className="rounded-2xl border p-4">
+                        <OwnerTrustCard
+                          name={getProfileName(ownerProfile)}
+                          ownerLevel={getOwnerLevelLabel(ownerLevel)}
+                          photoVerified={
+                            ownedProduct.verification_status ===
+                            "photo_verified"
+                          }
+                          ownershipMonths={ownedProduct.ownership_months}
+                          rating={ownedProduct.rating}
+                          scorecardRating={ownerRating?.overall_rating}
+                          answerCount={helpfulActivity.answerCount}
+                          helpfulCount={helpfulActivity.helpfulCount}
+                          compact
+                        />
 
-                      <div className="mt-3 flex flex-wrap items-center gap-2">
+	                      <div className="mt-3 hidden flex-wrap items-center gap-2">
                         <span
                           className={`rounded-full px-3 py-1 text-xs font-black ${getOwnerLevelBadgeClass(
                             ownerLevel
@@ -860,62 +1127,36 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
         </div>
 
         <aside className="space-y-5 lg:sticky lg:top-4 lg:self-start">
-          <section className="card p-5">
-            <h2 className="text-xl font-black">Take action</h2>
-            <div className="mt-4 flex flex-col gap-3">
-              <a href="#ask-question" className="btn btn-dark w-full">
-                Ask owners a question
-              </a>
-              <ClaimProductModal
-                productId={product.id}
-                productSlug={product.slug}
-                category={product.category}
-                triggerClassName="btn w-full"
-              />
-              <Link href="/my-products" className="btn w-full">
-                My products
-              </Link>
-            </div>
-          </section>
-
-          <section className="card p-5">
-            <h2 className="text-xl font-black">Owner help matters</h2>
-            <p className="mt-2 text-sm leading-6 text-muted">
-              Owners help buyers by answering questions, sharing long-term
-              experience, and adding scorecards.
-            </p>
-            <ClaimProductModal
-              productId={product.id}
-              productSlug={product.slug}
-              category={product.category}
-              triggerClassName="btn btn-dark mt-4 w-full"
-            />
-          </section>
-
           {productSpecs && (
             <section className="card p-5">
-              <h2 className="text-xl font-black">Product details</h2>
-              {snapshotItems.length > 0 && (
-                <div className="mt-4 grid gap-2">
-                  {snapshotItems.map(([label, value]) => (
-                    <div key={label} className="rounded-2xl bg-slate-50 p-3">
-                      <p className="text-xs font-black uppercase text-muted">
-                        {label}
-                      </p>
-                      <p className="mt-1 font-bold">{value}</p>
-                    </div>
-                  ))}
+	              <h2 className="text-xl font-black">Product details</h2>
+	              {snapshotItems.length > 0 && (
+	                <div className="mt-4 divide-y rounded-2xl bg-slate-50">
+	                  {snapshotItems.map(([label, value]) => (
+	                    <div
+                        key={label}
+                        className="flex items-start justify-between gap-4 p-3"
+                      >
+	                      <p className="text-xs font-black uppercase text-muted">
+	                        {label}
+	                      </p>
+	                      <p className="text-right text-sm font-bold">{value}</p>
+	                    </div>
+	                  ))}
 
-                  {simpleSpecEntries.map(([key, value]) => (
-                    <div key={key} className="rounded-2xl bg-slate-50 p-3">
-                      <p className="text-xs font-black uppercase text-muted">
-                        {formatSpecLabel(key)}
-                      </p>
-                      <p className="mt-1 font-bold">
-                        {cleanDisplayText(value)}
-                      </p>
-                    </div>
-                  ))}
+	                  {simpleSpecEntries.map(([key, value]) => (
+	                    <div
+                        key={key}
+                        className="flex items-start justify-between gap-4 p-3"
+                      >
+	                      <p className="text-xs font-black uppercase text-muted">
+	                        {formatSpecLabel(key)}
+	                      </p>
+	                      <p className="text-right text-sm font-bold">
+	                        {cleanDisplayText(value)}
+	                      </p>
+	                    </div>
+	                  ))}
                 </div>
               )}
 
@@ -941,52 +1182,41 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
                         {item}
                       </li>
                     ))}
-                  </ul>
-                </div>
-              )}
-            </section>
-          )}
+	                  </ul>
+	                </div>
+	              )}
 
-          {starterQuestions.length > 0 && (
-            <section className="card p-5">
-              <h2 className="text-xl font-black">Question ideas</h2>
-              <ul className="mt-3 space-y-2 text-sm">
-                {starterQuestions.slice(0, 5).map((question: string, index: number) => (
-                  <li key={index} className="rounded-2xl bg-slate-50 p-3">
-                    {question}
-                  </li>
-                ))}
-              </ul>
-            </section>
-          )}
+                {externalSourceLinks.length > 0 && (
+                  <details id="external-sources" className="mt-5 rounded-2xl bg-slate-50 p-3">
+                    <summary className="cursor-pointer text-sm font-black">
+                      External sources
+                    </summary>
+                    <p className="mt-2 text-xs font-bold leading-5 text-muted">
+                      Used for product facts and source discovery. OwnerCheck
+                      real-owner answers are separate.
+                    </p>
+                    <div className="mt-3 flex flex-wrap gap-2 text-xs font-bold">
+                      {externalSourceLinks.slice(0, 8).map((link) => (
+                        <a
+                          key={link.url}
+                          href={link.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="underline"
+                        >
+                          {link.title}
+                        </a>
+                      ))}
+                    </div>
+                  </details>
+                )}
+	            </section>
+	          )}
+
         </aside>
       </section>
 
-      {externalSourceLinks.length > 0 && (
-        <section id="external-sources" className="card mt-5 p-5">
-          <h2 className="text-2xl font-black">External sources</h2>
-          <p className="mt-2 text-sm font-black text-muted">
-            Used for product facts and source discovery. OwnerCheck real-owner
-            answers are separate.
-          </p>
-
-          <div className="mt-4 flex flex-wrap gap-3 text-sm font-bold">
-            {externalSourceLinks.map((link) => (
-              <a
-                key={link.url}
-                href={link.url}
-                target="_blank"
-                rel="noreferrer"
-                className="underline"
-              >
-                {link.title}
-              </a>
-            ))}
-          </div>
-        </section>
-      )}
-
-      <div className="fixed inset-x-0 bottom-0 z-30 border-t bg-white/95 p-3 shadow-lg backdrop-blur md:hidden">
+	      <div className="fixed inset-x-0 bottom-0 z-30 border-t bg-white/95 p-3 shadow-lg backdrop-blur md:hidden">
         <div className="mx-auto grid max-w-6xl grid-cols-2 gap-3">
           <a href="#ask-question" className="btn btn-dark justify-center">
             Ask owners
