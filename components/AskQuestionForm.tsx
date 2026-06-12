@@ -35,55 +35,16 @@ export function AskQuestionForm({ productId }: AskQuestionFormProps) {
       return;
     }
 
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("credit_balance")
-      .eq("id", user.id)
-      .single();
-
-    if (profileError || !profile) {
-      setLoading(false);
-      setMessage("Could not load your credits.");
-      return;
-    }
-
-    if ((profile.credit_balance || 0) < 10) {
-      setLoading(false);
-      setMessage("You need at least 10 credits to ask a question.");
-      return;
-    }
-
-    const { data: question, error } = await supabase
-      .from("questions")
-      .insert({
-        product_id: productId,
-        buyer_id: user.id,
-        question_text: text,
-        credit_reward: 10,
-        status: "open",
-      })
-      .select("id")
-      .single();
-
-    if (error || !question) {
-      setLoading(false);
-      setMessage(error?.message || "Could not add question.");
-      return;
-    }
-
-    const newBalance = (profile.credit_balance || 0) - 10;
-
-    await supabase
-      .from("profiles")
-      .update({ credit_balance: newBalance })
-      .eq("id", user.id);
-
-    await supabase.from("credit_transactions").insert({
-      user_id: user.id,
-      amount: -10,
-      reason: "Asked a product question",
-      related_question_id: question.id,
+    const { error } = await supabase.rpc("create_public_question", {
+      product_id_input: productId,
+      question_text_input: text,
     });
+
+    if (error) {
+      setLoading(false);
+      setMessage(error.message || "Could not add question.");
+      return;
+    }
 
     setLoading(false);
     setQuestionText("");

@@ -87,6 +87,7 @@ export function Header() {
           {ready && loggedIn && (
             <>
               <Link href="/my-products">My products</Link>
+              <Link href="/owner/dashboard">Owner dashboard</Link>
               <Link href="/direct-requests">
                 Direct requests
                 {pendingDirectRequestCount > 0

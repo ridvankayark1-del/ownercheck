@@ -93,8 +93,11 @@ create table if not exists public.questions (
   buyer_name text,
   question_text text not null,
   credit_reward integer not null default 10,
+  winning_owner_id uuid references public.profiles(id) on delete set null,
+  winning_answer_id uuid,
   status text not null default 'open' check (status in ('open', 'answered', 'closed')),
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  answered_at timestamptz
 );
 
 create table if not exists public.answers (
@@ -109,18 +112,56 @@ create table if not exists public.answers (
   constraint unique_user_answer_per_question unique(question_id, owner_id)
 );
 
+alter table public.questions
+  add constraint questions_winning_answer_id_fkey
+  foreign key (winning_answer_id) references public.answers(id) on delete set null;
+
 create table if not exists public.direct_questions (
   id uuid primary key default gen_random_uuid(),
   product_id uuid references public.products(id) on delete cascade,
   buyer_id uuid references public.profiles(id) on delete cascade,
   owner_id uuid references public.profiles(id) on delete cascade,
+  chat_id uuid,
   question_text text not null,
   answer_text text,
-  status text not null default 'pending' check (status in ('pending', 'answered')),
+  status text not null default 'pending' check (status in ('pending', 'accepted', 'declined', 'answered')),
   credit_cost integer not null default 25,
   credit_reward integer not null default 20,
   created_at timestamptz not null default now(),
+  accepted_at timestamptz,
+  declined_at timestamptz,
   answered_at timestamptz
+);
+
+create table if not exists public.chats (
+  id uuid primary key default gen_random_uuid(),
+  direct_question_id uuid unique references public.direct_questions(id) on delete set null,
+  product_id uuid references public.products(id) on delete cascade,
+  buyer_id uuid not null references public.profiles(id) on delete cascade,
+  owner_id uuid not null references public.profiles(id) on delete cascade,
+  status text not null default 'open' check (status in ('open', 'closed')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.direct_questions
+  add constraint direct_questions_chat_id_fkey
+  foreign key (chat_id) references public.chats(id) on delete set null;
+
+create table if not exists public.chat_participants (
+  chat_id uuid not null references public.chats(id) on delete cascade,
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  role text not null check (role in ('buyer', 'owner')),
+  created_at timestamptz not null default now(),
+  primary key (chat_id, user_id)
+);
+
+create table if not exists public.chat_messages (
+  id uuid primary key default gen_random_uuid(),
+  chat_id uuid not null references public.chats(id) on delete cascade,
+  sender_id uuid not null references public.profiles(id) on delete cascade,
+  message_text text not null,
+  created_at timestamptz not null default now()
 );
 
 create table if not exists public.answer_helpful_votes (
@@ -226,7 +267,9 @@ security definer
 set search_path = public
 as $$
 begin
-  if public.is_admin() then
+  if public.is_admin()
+    or current_setting('ownercheck.secure_credit_flow', true) = 'on'
+  then
     return new;
   end if;
 
@@ -266,7 +309,9 @@ security definer
 set search_path = public
 as $$
 begin
-  if public.is_admin() then
+  if public.is_admin()
+    or current_setting('ownercheck.secure_credit_flow', true) = 'on'
+  then
     return new;
   end if;
 
@@ -292,22 +337,13 @@ security definer
 set search_path = public
 as $$
 begin
-  if public.is_admin() then
+  if public.is_admin()
+    or current_setting('ownercheck.secure_credit_flow', true) = 'on'
+  then
     return new;
   end if;
 
-  if new.product_id is distinct from old.product_id
-    or new.buyer_id is distinct from old.buyer_id
-    or new.owner_id is distinct from old.owner_id
-    or new.question_text is distinct from old.question_text
-    or new.credit_cost is distinct from old.credit_cost
-    or new.credit_reward is distinct from old.credit_reward
-    or old.status <> 'pending'
-    or new.status <> 'answered'
-    or new.answer_text is null
-  then
-    raise exception 'Owners can only answer pending direct questions.';
-  end if;
+  raise exception 'Direct requests can only be changed through secure server flows.';
 
   return new;
 end;
@@ -318,8 +354,208 @@ create trigger prevent_direct_question_protected_updates
 before update on public.direct_questions
 for each row execute function public.prevent_direct_question_protected_updates();
 
+create or replace function public.create_public_question(
+  product_id_input uuid,
+  question_text_input text
+)
+returns public.questions
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  asker_id_value uuid := auth.uid();
+  asker_credits integer;
+  created_question public.questions;
+begin
+  if asker_id_value is null then
+    raise exception 'Log in to ask a public question.';
+  end if;
+
+  if nullif(trim(question_text_input), '') is null then
+    raise exception 'Write a question first.';
+  end if;
+
+  select credit_balance
+  into asker_credits
+  from public.profiles
+  where id = asker_id_value
+  for update;
+
+  if not found then
+    raise exception 'Could not load your credits.';
+  end if;
+
+  if asker_credits < 10 then
+    raise exception 'You need at least 10 credits to ask a question.';
+  end if;
+
+  perform set_config('ownercheck.secure_credit_flow', 'on', true);
+
+  insert into public.questions (
+    product_id,
+    buyer_id,
+    question_text,
+    credit_reward,
+    status
+  )
+  values (
+    product_id_input,
+    asker_id_value,
+    trim(question_text_input),
+    10,
+    'open'
+  )
+  returning * into created_question;
+
+  update public.profiles
+  set credit_balance = credit_balance - 10
+  where id = asker_id_value;
+
+  insert into public.credit_transactions (
+    user_id,
+    amount,
+    reason,
+    related_question_id
+  )
+  values (
+    asker_id_value,
+    -10,
+    'Asked a public product question',
+    created_question.id
+  );
+
+  return created_question;
+end;
+$$;
+
+grant execute on function public.create_public_question(uuid, text) to authenticated;
+
+create or replace function public.answer_public_question(
+  question_id_input uuid,
+  answer_text_input text
+)
+returns public.answers
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  answering_owner_id uuid := auth.uid();
+  question_record public.questions;
+  owner_claim public.owned_products;
+  created_answer public.answers;
+  reward_amount integer;
+begin
+  if answering_owner_id is null then
+    raise exception 'Log in to answer this question.';
+  end if;
+
+  if nullif(trim(answer_text_input), '') is null then
+    raise exception 'Write an answer first.';
+  end if;
+
+  select *
+  into question_record
+  from public.questions
+  where id = question_id_input
+  for update;
+
+  if not found then
+    raise exception 'Question not found.';
+  end if;
+
+  if question_record.buyer_id = answering_owner_id then
+    raise exception 'You cannot answer your own question.';
+  end if;
+
+  if question_record.status <> 'open'
+    or question_record.winning_owner_id is not null
+    or question_record.winning_answer_id is not null
+  then
+    raise exception 'This question was already answered.';
+  end if;
+
+  select *
+  into owner_claim
+  from public.owned_products
+  where product_id = question_record.product_id
+    and user_id = answering_owner_id
+    and verification_status in ('photo_verified', 'receipt_verified', 'trusted_owner')
+  order by created_at asc
+  limit 1;
+
+  if not found then
+    raise exception 'Only verified owners of this product can answer.';
+  end if;
+
+  reward_amount := coalesce(question_record.credit_reward, 10);
+  perform set_config('ownercheck.secure_credit_flow', 'on', true);
+
+  insert into public.answers (
+    question_id,
+    owned_product_id,
+    owner_id,
+    answer_text,
+    helpful_count
+  )
+  values (
+    question_record.id,
+    owner_claim.id,
+    answering_owner_id,
+    trim(answer_text_input),
+    0
+  )
+  returning * into created_answer;
+
+  update public.questions
+  set
+    winning_owner_id = answering_owner_id,
+    winning_answer_id = created_answer.id,
+    status = 'answered',
+    answered_at = now()
+  where id = question_record.id
+    and status = 'open'
+    and winning_owner_id is null
+    and winning_answer_id is null;
+
+  if not found then
+    raise exception 'This question was already answered.';
+  end if;
+
+  update public.profiles
+  set
+    credit_balance = credit_balance + reward_amount,
+    trust_score = trust_score + 1
+  where id = answering_owner_id;
+
+  insert into public.credit_transactions (
+    user_id,
+    amount,
+    reason,
+    related_question_id,
+    related_answer_id
+  )
+  values (
+    answering_owner_id,
+    reward_amount,
+    'Answered a public product question',
+    question_record.id,
+    created_answer.id
+  );
+
+  return created_answer;
+exception
+  when unique_violation then
+    raise exception 'You already answered this question.';
+end;
+$$;
+
+grant execute on function public.answer_public_question(uuid, text) to authenticated;
+
 create or replace function public.create_direct_question(
   product_id_input uuid,
+  selected_owner_id_input uuid,
   question_text_input text
 )
 returns public.direct_questions
@@ -330,7 +566,7 @@ as $$
 declare
   buyer_id_value uuid := auth.uid();
   buyer_credits integer;
-  selected_owner_id uuid;
+  selected_owner_claim public.owned_products;
   created_question public.direct_questions;
 begin
   if buyer_id_value is null then
@@ -355,23 +591,25 @@ begin
     raise exception 'You need at least 25 credits to ask an owner directly.';
   end if;
 
-  select owned_products.user_id
-  into selected_owner_id
+  if selected_owner_id_input is null then
+    raise exception 'Choose an owner to contact.';
+  end if;
+
+  if selected_owner_id_input = buyer_id_value then
+    raise exception 'You cannot start a direct request with yourself.';
+  end if;
+
+  select *
+  into selected_owner_claim
   from public.owned_products
   where owned_products.product_id = product_id_input
-    and owned_products.user_id <> buyer_id_value
-    and owned_products.verification_status in ('photo_verified', 'photo_submitted', 'unverified')
-  order by
-    case owned_products.verification_status
-      when 'photo_verified' then 0
-      when 'photo_submitted' then 1
-      else 2
-    end,
-    owned_products.created_at asc
+    and owned_products.user_id = selected_owner_id_input
+    and owned_products.verification_status in ('photo_verified', 'receipt_verified', 'trusted_owner')
+  order by owned_products.created_at asc
   limit 1;
 
-  if selected_owner_id is null then
-    raise exception 'No available owners yet. Ask a public question instead.';
+  if not found then
+    raise exception 'Choose a verified owner of this product.';
   end if;
 
   perform set_config('ownercheck.secure_credit_flow', 'on', true);
@@ -388,7 +626,7 @@ begin
   values (
     product_id_input,
     buyer_id_value,
-    selected_owner_id,
+    selected_owner_id_input,
     trim(question_text_input),
     'pending',
     25,
@@ -415,7 +653,203 @@ begin
 end;
 $$;
 
-grant execute on function public.create_direct_question(uuid, text) to authenticated;
+grant execute on function public.create_direct_question(uuid, uuid, text) to authenticated;
+
+drop function if exists public.answer_direct_question(uuid, text);
+
+create or replace function public.accept_direct_question(
+  direct_question_id_input uuid
+)
+returns public.chats
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  accepting_owner_id uuid := auth.uid();
+  question_record public.direct_questions;
+  created_chat public.chats;
+begin
+  if accepting_owner_id is null then
+    raise exception 'Log in to accept this direct request.';
+  end if;
+
+  select *
+  into question_record
+  from public.direct_questions
+  where id = direct_question_id_input
+  for update;
+
+  if not found then
+    raise exception 'Direct request not found.';
+  end if;
+
+  if question_record.owner_id <> accepting_owner_id then
+    raise exception 'Only the selected owner can accept this direct request.';
+  end if;
+
+  if question_record.status = 'declined' then
+    raise exception 'This direct request was declined.';
+  end if;
+
+  if question_record.status in ('accepted', 'answered')
+    and question_record.chat_id is not null
+  then
+    select *
+    into created_chat
+    from public.chats
+    where id = question_record.chat_id;
+
+    if found then
+      return created_chat;
+    end if;
+  end if;
+
+  perform set_config('ownercheck.secure_credit_flow', 'on', true);
+
+  insert into public.chats (
+    direct_question_id,
+    product_id,
+    buyer_id,
+    owner_id
+  )
+  values (
+    question_record.id,
+    question_record.product_id,
+    question_record.buyer_id,
+    question_record.owner_id
+  )
+  on conflict (direct_question_id) do update
+  set updated_at = public.chats.updated_at
+  returning * into created_chat;
+
+  insert into public.chat_participants (chat_id, user_id, role)
+  values
+    (created_chat.id, question_record.buyer_id, 'buyer'),
+    (created_chat.id, question_record.owner_id, 'owner')
+  on conflict (chat_id, user_id) do nothing;
+
+  insert into public.chat_messages (chat_id, sender_id, message_text)
+  select created_chat.id, question_record.buyer_id, question_record.question_text
+  where not exists (
+    select 1
+    from public.chat_messages
+    where chat_messages.chat_id = created_chat.id
+  );
+
+  update public.direct_questions
+  set
+    chat_id = created_chat.id,
+    status = 'accepted',
+    accepted_at = coalesce(accepted_at, now())
+  where id = question_record.id;
+
+  return created_chat;
+end;
+$$;
+
+grant execute on function public.accept_direct_question(uuid) to authenticated;
+
+create or replace function public.decline_direct_question(
+  direct_question_id_input uuid
+)
+returns public.direct_questions
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  declining_owner_id uuid := auth.uid();
+  question_record public.direct_questions;
+begin
+  if declining_owner_id is null then
+    raise exception 'Log in to decline this direct request.';
+  end if;
+
+  select *
+  into question_record
+  from public.direct_questions
+  where id = direct_question_id_input
+  for update;
+
+  if not found then
+    raise exception 'Direct request not found.';
+  end if;
+
+  if question_record.owner_id <> declining_owner_id then
+    raise exception 'Only the selected owner can decline this direct request.';
+  end if;
+
+  if question_record.status <> 'pending' then
+    raise exception 'Only pending direct requests can be declined.';
+  end if;
+
+  perform set_config('ownercheck.secure_credit_flow', 'on', true);
+
+  update public.direct_questions
+  set
+    status = 'declined',
+    declined_at = now()
+  where id = question_record.id
+    and status = 'pending'
+    and chat_id is null
+  returning * into question_record;
+
+  if not found then
+    raise exception 'This direct request is no longer pending.';
+  end if;
+
+  return question_record;
+end;
+$$;
+
+grant execute on function public.decline_direct_question(uuid) to authenticated;
+
+create or replace function public.send_chat_message(
+  chat_id_input uuid,
+  message_text_input text
+)
+returns public.chat_messages
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  sender_id_value uuid := auth.uid();
+  created_message public.chat_messages;
+begin
+  if sender_id_value is null then
+    raise exception 'Log in to send a chat message.';
+  end if;
+
+  if nullif(trim(message_text_input), '') is null then
+    raise exception 'Write a message first.';
+  end if;
+
+  if not exists (
+    select 1
+    from public.chat_participants
+    where chat_participants.chat_id = chat_id_input
+      and chat_participants.user_id = sender_id_value
+  ) then
+    raise exception 'You cannot send messages in this chat.';
+  end if;
+
+  perform set_config('ownercheck.secure_credit_flow', 'on', true);
+
+  insert into public.chat_messages (chat_id, sender_id, message_text)
+  values (chat_id_input, sender_id_value, trim(message_text_input))
+  returning * into created_message;
+
+  update public.chats
+  set updated_at = now()
+  where id = chat_id_input;
+
+  return created_message;
+end;
+$$;
+
+grant execute on function public.send_chat_message(uuid, text) to authenticated;
 
 alter table public.profiles enable row level security;
 alter table public.admin_users enable row level security;
@@ -425,6 +859,9 @@ alter table public.owner_product_ratings enable row level security;
 alter table public.questions enable row level security;
 alter table public.answers enable row level security;
 alter table public.direct_questions enable row level security;
+alter table public.chats enable row level security;
+alter table public.chat_participants enable row level security;
+alter table public.chat_messages enable row level security;
 alter table public.answer_helpful_votes enable row level security;
 alter table public.credit_transactions enable row level security;
 alter table public.reports enable row level security;
@@ -506,8 +943,9 @@ create policy "Owners can update own product ratings" on public.owner_product_ra
 -- Public questions are readable on product pages.
 create policy "Questions are public" on public.questions for select using (true);
 
--- Buyers can ask public questions as themselves or anonymously.
-create policy "Users can ask questions" on public.questions for insert with check (auth.uid() = buyer_id or buyer_id is null);
+-- Public question creation must use create_public_question so credits are
+-- deducted atomically.
+create policy "Public question inserts require secure RPC" on public.questions for insert with check (false);
 
 -- Buyers can edit their own question row.
 create policy "Users can update questions they asked" on public.questions for update using (auth.uid() = buyer_id);
@@ -518,8 +956,9 @@ create policy "Admins can update questions" on public.questions for update using
 -- Public answers are readable on product pages.
 create policy "Answers are public" on public.answers for select using (true);
 
--- Users can answer public questions as themselves.
-create policy "Users can answer questions" on public.answers for insert with check (auth.uid() = owner_id);
+-- Public answers must use answer_public_question so first-winner and reward
+-- logic is atomic.
+create policy "Public answer inserts require secure RPC" on public.answers for insert with check (false);
 
 -- Answer authors can update their own answer text; helpful counts should move through secure server flows.
 create policy "Owners can update own answers" on public.answers for update using (auth.uid() = owner_id) with check (auth.uid() = owner_id);
@@ -530,14 +969,45 @@ create policy "Admins can update answers" on public.answers for update using (pu
 -- Buyers can read their own private direct questions.
 create policy "Buyers can read own direct questions" on public.direct_questions for select using (auth.uid() = buyer_id);
 
--- Assigned owners can read direct questions sent to them.
-create policy "Owners can read assigned direct questions" on public.direct_questions for select using (auth.uid() = owner_id);
+-- Selected owners can read private directs sent to them.
+create policy "Selected owners can read assigned direct questions" on public.direct_questions for select using (auth.uid() = owner_id);
 
 -- Direct question inserts must use create_direct_question so credits are deducted atomically.
 create policy "Direct question inserts require secure RPC" on public.direct_questions for insert with check (false);
 
--- Assigned owners can only answer pending direct questions; protected fields are guarded by trigger.
-create policy "Owners can answer assigned direct questions" on public.direct_questions for update using (auth.uid() = owner_id) with check (auth.uid() = owner_id);
+-- Direct request state changes must use accept_direct_question and
+-- decline_direct_question so private chat creation stays atomic.
+create policy "Direct question updates require secure RPC" on public.direct_questions for update using (false) with check (false);
+
+-- Private chats are visible only to their two participants.
+create policy "Participants can read own chats" on public.chats for select using (
+  auth.uid() = buyer_id or auth.uid() = owner_id
+);
+
+create policy "Chat inserts require secure RPC" on public.chats for insert with check (false);
+create policy "Chat updates require secure RPC" on public.chats for update using (false) with check (false);
+
+create policy "Participants can read own chat participants" on public.chat_participants for select using (
+  exists (
+    select 1
+    from public.chats
+    where chats.id = chat_participants.chat_id
+      and (chats.buyer_id = auth.uid() or chats.owner_id = auth.uid())
+  )
+);
+
+create policy "Chat participant inserts require secure RPC" on public.chat_participants for insert with check (false);
+
+create policy "Participants can read own chat messages" on public.chat_messages for select using (
+  exists (
+    select 1
+    from public.chats
+    where chats.id = chat_messages.chat_id
+      and (chats.buyer_id = auth.uid() or chats.owner_id = auth.uid())
+  )
+);
+
+create policy "Chat message inserts require secure RPC" on public.chat_messages for insert with check (false);
 
 -- Helpful votes are public count inputs.
 create policy "Helpful votes are public" on public.answer_helpful_votes for select using (true);

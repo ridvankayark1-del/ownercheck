@@ -87,10 +87,13 @@ type Answer = {
 
 type RawDirectQuestion = {
   id: string;
+  chat_id: string | null;
   question_text: string;
   answer_text: string | null;
   status: string;
   created_at: string;
+  accepted_at: string | null;
+  declined_at: string | null;
   answered_at: string | null;
   products: QuestionProductInfo | QuestionProductInfo[] | null;
   profiles:
@@ -107,10 +110,13 @@ type RawDirectQuestion = {
 
 type DirectQuestion = {
   id: string;
+  chat_id: string | null;
   question_text: string;
   answer_text: string | null;
   status: string;
   created_at: string;
+  accepted_at: string | null;
+  declined_at: string | null;
   answered_at: string | null;
   products: QuestionProductInfo | null;
   profiles: {
@@ -199,7 +205,7 @@ export default function ProfilePage() {
       const { data: answersData, error: answersError } = await supabase
         .from("answers")
         .select(
-          "id, answer_text, helpful_count, questions(question_text, products(slug, name))"
+          "id, answer_text, helpful_count, questions!answers_question_id_fkey(question_text, products(slug, name))"
         )
         .eq("owner_id", user.id)
         .order("created_at", { ascending: false });
@@ -212,7 +218,7 @@ export default function ProfilePage() {
         await supabase
           .from("direct_questions")
           .select(
-            "id, question_text, answer_text, status, created_at, answered_at, products(slug, name), profiles!direct_questions_owner_id_fkey(display_name, email)"
+            "id, chat_id, question_text, answer_text, status, created_at, accepted_at, declined_at, answered_at, products(slug, name), profiles!direct_questions_owner_id_fkey(display_name, email)"
           )
           .eq("buyer_id", user.id)
           .order("created_at", { ascending: false });
@@ -462,10 +468,10 @@ export default function ProfilePage() {
       </section>
 
       <section className="card mt-8 p-6">
-        <h2 className="text-2xl font-black">Direct questions</h2>
+        <h2 className="text-2xl font-black">Direct Requests</h2>
 
         {directQuestions.length === 0 ? (
-          <p className="mt-3 text-muted">No direct questions asked yet.</p>
+          <p className="mt-3 text-muted">No direct requests sent yet.</p>
         ) : (
           <div className="mt-5 grid gap-4 md:grid-cols-2">
             {directQuestions.map((question) => {
@@ -475,10 +481,9 @@ export default function ProfilePage() {
                 "Owner";
 
               return (
-                <Link
+                <div
                   key={question.id}
-                  href={`/product/${question.products?.slug || ""}`}
-                  className="block rounded-2xl border p-4 hover:bg-slate-50"
+                  className="rounded-2xl border p-4"
                 >
                   <p className="text-sm font-bold text-muted">
                     {question.products?.name || "Unknown product"} ·{" "}
@@ -486,21 +491,29 @@ export default function ProfilePage() {
                   </p>
                   <p className="mt-3 font-bold">{question.question_text}</p>
 
-                  {question.answer_text ? (
-                    <div className="mt-4 rounded-2xl bg-slate-50 p-4">
+                  {["accepted", "answered"].includes(question.status) &&
+                  question.chat_id ? (
+                    <div className="mt-4 rounded-2xl bg-emerald-50 p-4">
                       <p className="text-xs font-black uppercase text-muted">
-                        Private answer
+                        Accepted
                       </p>
-                      <p className="mt-2 line-clamp-4">
-                        {question.answer_text}
-                      </p>
+                      <Link
+                        href={`/chats/${question.chat_id}`}
+                        className="mt-3 inline-flex text-sm font-bold underline"
+                      >
+                        Open chat
+                      </Link>
                     </div>
+                  ) : question.status === "declined" ? (
+                    <p className="mt-3 rounded-2xl bg-slate-50 p-4 text-sm font-bold text-muted">
+                      Declined. No private chat was created.
+                    </p>
                   ) : (
                     <p className="mt-3 text-sm text-muted">
-                      Waiting for the owner to answer.
+                      Pending. Waiting for the owner to accept.
                     </p>
                   )}
-                </Link>
+                </div>
               );
             })}
           </div>

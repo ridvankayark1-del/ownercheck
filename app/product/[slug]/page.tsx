@@ -2,7 +2,6 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { AskQuestionForm } from "@/components/AskQuestionForm";
-import { AnswerQuestionForm } from "@/components/AnswerQuestionForm";
 import { ClaimProductModal } from "@/components/ClaimProductModal";
 import { DirectQuestionForm } from "@/components/DirectQuestionForm";
 import { HelpfulButton } from "@/components/HelpfulButton";
@@ -350,6 +349,30 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
   ];
 
   const ownerCount = ownedProducts?.length || 0;
+  const directOwnerOptions =
+    ownedProducts
+      ?.filter(
+        (ownedProduct: OwnedProduct) =>
+          ownedProduct.user_id &&
+          ["photo_verified", "receipt_verified", "trusted_owner"].includes(
+            ownedProduct.verification_status
+          )
+      )
+      .map((ownedProduct: OwnedProduct) => {
+        const ownerProfile = ownedProduct.user_id
+          ? profileMap.get(ownedProduct.user_id)
+          : undefined;
+        const ownerLevel = getOwnerLevel(
+          ownedProduct.verification_status,
+          ownerProfile?.trust_score
+        );
+
+        return {
+          userId: ownedProduct.user_id as string,
+          name: getProfileName(ownerProfile),
+          ownerLevel: getOwnerLevelLabel(ownerLevel),
+        };
+      }) || [];
 
   const photoVerifiedCount =
     ownedProducts?.filter(
@@ -635,7 +658,10 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
 
               <div className="space-y-4 [&_.card]:bg-slate-50 [&_.card]:p-4 [&_h2]:text-xl">
                 <AskQuestionForm productId={product.id} />
-                <DirectQuestionForm productId={product.id} />
+                <DirectQuestionForm
+                  productId={product.id}
+                  ownerOptions={directOwnerOptions}
+                />
               </div>
             </div>
           </section>
@@ -720,9 +746,14 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
                         </div>
                       )}
 
-                      <div className="mt-4">
-                        <AnswerQuestionForm questionId={question.id} />
-                      </div>
+                      {questionAnswers.length === 0 && (
+                        <Link
+                          href={`/owner/questions/${question.id}`}
+                          className="btn btn-dark mt-4"
+                        >
+                          Answer question
+                        </Link>
+                      )}
                     </div>
                   );
                 })}
