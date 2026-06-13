@@ -26,6 +26,7 @@ type Product = {
   } | null;
   image_url: string | null;
   product_verification_status: string | null;
+  canonical_id: string | null;
   source_url: string | null;
   product_url: string | null;
   verified_source: string | null;
@@ -66,7 +67,8 @@ type ProductStatus =
   | "user_submitted"
   | "pending_enrichment"
   | "needs_review"
-  | "rejected";
+  | "rejected"
+  | "duplicate";
 
 type QueueView =
   | "needs_attention"
@@ -77,6 +79,7 @@ type QueueView =
   | "needs_identity"
   | "recently_imported"
   | "catalog_verified"
+  | "duplicate"
   | "rejected"
   | "all";
 
@@ -104,6 +107,7 @@ const QUEUE_VIEWS: Array<{ id: QueueView; label: string }> = [
   { id: "needs_identity", label: "Needs identity review" },
   { id: "recently_imported", label: "Recently imported" },
   { id: "catalog_verified", label: "Catalog verified" },
+  { id: "duplicate", label: "Duplicates" },
   { id: "rejected", label: "Rejected" },
   { id: "all", label: "All products" },
 ];
@@ -310,7 +314,8 @@ function isCatalogReady(product: Product) {
       product.specs_approved_at &&
       product.image_approved_at &&
       product.duplicate_reviewed_at &&
-      product.product_verification_status !== "rejected"
+      product.product_verification_status !== "rejected" &&
+      product.product_verification_status !== "duplicate"
   );
 }
 
@@ -351,6 +356,10 @@ function getSpecSourceSummary(product: Product, rows: SpecDraftRow[]) {
 }
 
 function getIssueChips(product: Product, candidates: DuplicateCandidateView[]) {
+  if (product.product_verification_status === "duplicate") {
+    return [{ label: "Duplicate", tone: "neutral" as const }];
+  }
+
   if (product.product_verification_status === "rejected") {
     return [{ label: "Rejected", tone: "bad" as const }];
   }
@@ -397,6 +406,7 @@ function getIssueChips(product: Product, candidates: DuplicateCandidateView[]) {
 }
 
 function getSuggestedAction(product: Product, candidates: DuplicateCandidateView[]) {
+  if (product.product_verification_status === "duplicate") return "View canonical";
   if (product.product_verification_status === "rejected") return "Review rejection";
   if (getDuplicateRisk(candidates) !== "Low" && !product.duplicate_reviewed_at) {
     return "Review duplicate candidates";
@@ -419,6 +429,7 @@ function getReadyBlocker(product: Product) {
   if (!product.image_approved_at) return "Cannot verify yet: image needs approval";
   if (!product.duplicate_reviewed_at) return "Cannot verify yet: duplicate check missing";
   if (product.product_verification_status === "rejected") return "Cannot verify rejected product";
+  if (product.product_verification_status === "duplicate") return "Cannot verify duplicate product";
   return "";
 }
 
@@ -447,6 +458,10 @@ export default function AdminProductsPage() {
   const [imageDrafts, setImageDrafts] = useState<Record<string, string>>({});
   const [sourceNoteDrafts, setSourceNoteDrafts] = useState<Record<string, string>>({});
   const [duplicateSearches, setDuplicateSearches] = useState<Record<string, string>>({});
+  const [mergeDuplicateProduct, setMergeDuplicateProduct] =
+    useState<Product | null>(null);
+  const [mergeCanonicalId, setMergeCanonicalId] = useState("");
+  const [mergeSearch, setMergeSearch] = useState("");
 
   async function getAdminSessionToken() {
     const {
@@ -495,7 +510,7 @@ export default function AdminProductsPage() {
     const { data, error } = await supabase
       .from("products")
       .select(
-        "id, slug, name, model, brand, category, specs, image_url, product_verification_status, source_url, product_url, verified_source, external_summary, enrichment_status, suggested_title, suggested_brand, suggested_model, suggested_category, suggested_product_type, suggested_short_summary, suggested_specs, suggested_image_url, enrichment_warnings, enrichment_sources, category_confidence, specs_confidence, identity_approved_at, specs_approved_at, image_approved_at, duplicate_reviewed_at, created_at"
+        "id, slug, name, model, brand, category, specs, image_url, product_verification_status, canonical_id, source_url, product_url, verified_source, external_summary, enrichment_status, suggested_title, suggested_brand, suggested_model, suggested_category, suggested_product_type, suggested_short_summary, suggested_specs, suggested_image_url, enrichment_warnings, enrichment_sources, category_confidence, specs_confidence, identity_approved_at, specs_approved_at, image_approved_at, duplicate_reviewed_at, created_at"
       )
       .order("created_at", { ascending: false })
       .range(0, pageLimit - 1);
@@ -597,6 +612,7 @@ export default function AdminProductsPage() {
 
     if (view === "all") return true;
     if (view === "catalog_verified") return product.product_verification_status === "catalog_verified";
+    if (view === "duplicate") return product.product_verification_status === "duplicate";
     if (view === "rejected") return product.product_verification_status === "rejected";
     if (view === "ready_to_verify") return isCatalogReady(product) && product.product_verification_status !== "catalog_verified";
     if (view === "possible_duplicates") return duplicateRisk !== "Low" && !product.duplicate_reviewed_at;
@@ -604,7 +620,11 @@ export default function AdminProductsPage() {
     if (view === "missing_images") return !product.image_url || !product.image_approved_at || isPlaceholderImage(product.image_url);
     if (view === "needs_identity") return !product.identity_approved_at || (product.category_confidence || 0) < 0.5;
     if (view === "recently_imported") return importedRecently;
-    return product.product_verification_status !== "catalog_verified" && product.product_verification_status !== "rejected";
+    return (
+      product.product_verification_status !== "catalog_verified" &&
+      product.product_verification_status !== "rejected" &&
+      product.product_verification_status !== "duplicate"
+    );
   }
 
   const filteredProducts = useMemo(() => {
@@ -645,6 +665,37 @@ export default function AdminProductsPage() {
 
   const activeProduct = products.find((product) => product.id === activeProductId) || null;
   const activeMeta = activeProduct ? productMeta.get(activeProduct.id) : null;
+  const mergeCanonicalOptions = useMemo(() => {
+    const search = mergeSearch.trim().toLowerCase();
+
+    return products
+      .filter(
+        (product) =>
+          product.id !== mergeDuplicateProduct?.id &&
+          product.product_verification_status !== "duplicate"
+      )
+      .filter((product) => {
+        if (!search) return true;
+        return [
+          product.name,
+          product.brand,
+          product.model,
+          product.category,
+          product.slug,
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase()
+          .includes(search);
+      })
+      .slice(0, 40);
+  }, [mergeDuplicateProduct?.id, mergeSearch, products]);
+
+  function openMergeDialog(product: Product, canonicalId = "") {
+    setMergeDuplicateProduct(product);
+    setMergeCanonicalId(canonicalId);
+    setMergeSearch("");
+  }
 
   async function saveIdentity(product: Product) {
     setWorking(true);
@@ -842,6 +893,48 @@ export default function AdminProductsPage() {
       setMessage("Product status updated.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not update product.");
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function submitProductMerge() {
+    if (!mergeDuplicateProduct || !mergeCanonicalId) {
+      setMessage("Choose a canonical product before merging.");
+      return;
+    }
+
+    setWorking(true);
+    setMessage("");
+
+    try {
+      const token = await getAdminSessionToken();
+      const response = await fetch("/api/admin/products/merge", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          duplicateId: mergeDuplicateProduct.id,
+          canonicalId: mergeCanonicalId,
+        }),
+      });
+      const result = (await response.json()) as { error?: string };
+
+      if (!response.ok) {
+        throw new Error(result.error || "Could not merge products.");
+      }
+
+      const duplicateName = mergeDuplicateProduct.name;
+      setMergeDuplicateProduct(null);
+      setMergeCanonicalId("");
+      setMergeSearch("");
+      setActiveProductId("");
+      await loadProducts({ clearMessage: false });
+      setMessage(`${duplicateName} merged into the canonical product.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not merge products.");
     } finally {
       setWorking(false);
     }
@@ -1086,6 +1179,7 @@ export default function AdminProductsPage() {
               <option value="community_created">Community-created</option>
               <option value="pending_enrichment">Pending enrichment</option>
               <option value="needs_review">Needs review</option>
+              <option value="duplicate">Duplicate</option>
               <option value="rejected">Rejected</option>
             </select>
           </div>
@@ -1226,6 +1320,15 @@ export default function AdminProductsPage() {
                       >
                         {meta?.suggestedAction || "Review"}
                       </button>
+                      {product.product_verification_status !== "duplicate" && (
+                        <button
+                          type="button"
+                          className="btn"
+                          onClick={() => openMergeDialog(product)}
+                        >
+                          Merge
+                        </button>
+                      )}
                     </div>
                   </article>
                 );
@@ -1764,6 +1867,18 @@ export default function AdminProductsPage() {
                               <Link href={`/product/${candidate.product.slug}`} className="mt-2 inline-flex text-xs font-black underline">
                                 View match
                               </Link>
+                              <button
+                                type="button"
+                                className="mt-2 ml-3 text-xs font-black underline"
+                                onClick={() =>
+                                  openMergeDialog(
+                                    activeProduct,
+                                    candidate.product.id
+                                  )
+                                }
+                              >
+                                Merge into this product
+                              </button>
                             </div>
                           </div>
                         </div>
@@ -1846,7 +1961,7 @@ export default function AdminProductsPage() {
                       ["Image approved", activeProduct.image_approved_at],
                       ["Duplicate checked", activeProduct.duplicate_reviewed_at],
                       ["Not rejected", activeProduct.product_verification_status !== "rejected"],
-                      ["Not duplicate", !activeProduct.verified_source || activeProduct.product_verification_status !== "rejected"],
+                      ["Not duplicate", activeProduct.product_verification_status !== "duplicate"],
                     ].map(([label, ok]) => (
                       <div key={label as string} className="rounded-2xl bg-slate-50 p-3">
                         <p className="font-black">{label}</p>
@@ -1886,6 +2001,98 @@ export default function AdminProductsPage() {
           )}
         </aside>
       </section>
+
+      {mergeDuplicateProduct && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 py-8">
+          <section className="w-full max-w-xl rounded-2xl bg-white p-6 shadow-xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-sm font-black uppercase text-muted">
+                  Merge duplicate product
+                </p>
+                <h2 className="mt-1 text-2xl font-black">
+                  {mergeDuplicateProduct.name}
+                </h2>
+                <p className="mt-2 text-sm font-bold text-muted">
+                  All questions, owner claims, chats, scorecards, and related
+                  product links will move to the canonical product.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="text-sm font-black underline"
+                onClick={() => {
+                  setMergeDuplicateProduct(null);
+                  setMergeCanonicalId("");
+                  setMergeSearch("");
+                }}
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mt-5 space-y-4">
+              <div>
+                <label className="label">Search canonical product</label>
+                <input
+                  className="input mt-2"
+                  value={mergeSearch}
+                  onChange={(event) => setMergeSearch(event.target.value)}
+                  placeholder="Search by title, brand, model, category..."
+                />
+              </div>
+
+              <div>
+                <label className="label">Canonical product</label>
+                <select
+                  className="input mt-2"
+                  value={mergeCanonicalId}
+                  onChange={(event) => setMergeCanonicalId(event.target.value)}
+                >
+                  <option value="">Choose canonical product...</option>
+                  {mergeCanonicalOptions.map((product) => (
+                    <option key={product.id} value={product.id}>
+                      {product.name} / {product.brand || "Unknown brand"} /{" "}
+                      {product.category || "Uncategorized"}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {mergeCanonicalId && (
+                <div className="rounded-2xl bg-amber-50 p-4 text-sm font-bold text-amber-900">
+                  This cannot be undone from the UI. The duplicate product will
+                  be marked as duplicate and linked to the selected canonical
+                  product.
+                </div>
+              )}
+
+              <div className="flex flex-wrap gap-3">
+                <button
+                  type="button"
+                  className="btn btn-dark"
+                  onClick={submitProductMerge}
+                  disabled={working || !mergeCanonicalId}
+                >
+                  {working ? "Merging..." : "Merge product"}
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => {
+                    setMergeDuplicateProduct(null);
+                    setMergeCanonicalId("");
+                    setMergeSearch("");
+                  }}
+                  disabled={working}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+      )}
     </main>
   );
 }

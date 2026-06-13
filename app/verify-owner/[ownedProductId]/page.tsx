@@ -13,6 +13,7 @@ type ProductInfo = {
 
 type RawVerificationClaim = {
   id: string;
+  verification_status: string;
   verification_code: string | null;
   verification_challenge: string | null;
   verification_token_expires_at: string | null;
@@ -21,6 +22,7 @@ type RawVerificationClaim = {
 
 type VerificationClaim = {
   id: string;
+  verification_status: string;
   verification_code: string | null;
   verification_challenge: string | null;
   verification_token_expires_at: string | null;
@@ -63,7 +65,7 @@ export default function VerifyOwnerPage() {
       const { data, error } = await supabase
         .from("owned_products")
         .select(
-          "id, verification_code, verification_challenge, verification_token_expires_at, products(name, brand, category)"
+          "id, verification_status, verification_code, verification_challenge, verification_token_expires_at, products(name, brand, category)"
         )
         .eq("id", params.ownedProductId)
         .eq("verification_token", token)
@@ -92,6 +94,7 @@ export default function VerifyOwnerPage() {
 
       setClaim({
         id: rawClaim.id,
+        verification_status: rawClaim.verification_status,
         verification_code: rawClaim.verification_code,
         verification_challenge: rawClaim.verification_challenge,
         verification_token_expires_at: rawClaim.verification_token_expires_at,
@@ -213,7 +216,11 @@ export default function VerifyOwnerPage() {
           onClick={submitPhoto}
           disabled={submitting}
         >
-          {submitting ? "Submitting..." : "Submit for review"}
+          {submitting
+            ? "Submitting..."
+            : claim.verification_status === "verification_rejected"
+              ? "Re-submit Verification"
+              : "Submit for review"}
         </button>
 
         {message && (

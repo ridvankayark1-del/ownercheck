@@ -37,7 +37,8 @@ create table if not exists public.products (
   data_source text not null default 'seed',
   ai_generated boolean not null default false,
   created_by uuid references auth.users(id) on delete set null,
-  product_verification_status text not null default 'user_submitted' check (product_verification_status in ('catalog_verified', 'community_created', 'user_submitted', 'pending_enrichment', 'needs_review', 'rejected')),
+  product_verification_status text not null default 'user_submitted' check (product_verification_status in ('catalog_verified', 'community_created', 'user_submitted', 'pending_enrichment', 'needs_review', 'rejected', 'duplicate')),
+  canonical_id uuid references public.products(id) on delete set null,
   source_url text,
   product_url text,
   verified_source text,
@@ -467,6 +468,7 @@ begin
     or new.common_complaints is distinct from old.common_complaints
     or new.external_review_links is distinct from old.external_review_links
     or new.external_summary_updated_at is distinct from old.external_summary_updated_at
+    or new.canonical_id is distinct from old.canonical_id
     or new.enrichment_status is distinct from old.enrichment_status
   then
     raise exception 'Only admins can update protected product fields.';
@@ -496,7 +498,15 @@ begin
 
   if new.user_id is distinct from old.user_id
     or new.product_id is distinct from old.product_id
-    or new.admin_notes is distinct from old.admin_notes
+    or (
+      new.admin_notes is distinct from old.admin_notes
+      and not (
+        new.user_id = auth.uid()
+        and old.verification_status = 'verification_rejected'
+        and new.verification_status = 'photo_submitted'
+        and new.admin_notes is null
+      )
+    )
     or new.verification_level is distinct from old.verification_level
   then
     raise exception 'Only admins can update protected ownership fields.';
@@ -985,6 +995,291 @@ $$;
 
 grant execute on function public.create_direct_question(uuid, uuid, text) to authenticated;
 
+drop function if exists public.create_direct_chat_transaction(uuid, uuid, uuid, text, integer);
+
+create or replace function public.create_direct_chat_transaction(
+  p_buyer_id uuid,
+  p_owner_id uuid,
+  p_product_id uuid,
+  p_initial_message text,
+  p_cost integer
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  buyer_credits integer;
+  created_chat_id uuid;
+begin
+  if auth.uid() is null then
+    raise exception 'Log in to start a private chat.';
+  end if;
+
+  if p_buyer_id is distinct from auth.uid() then
+    raise exception 'Buyer does not match the authenticated user.';
+  end if;
+
+  if p_owner_id is null then
+    raise exception 'Choose an owner to contact.';
+  end if;
+
+  if p_owner_id = p_buyer_id then
+    raise exception 'You cannot start a private chat with yourself.';
+  end if;
+
+  if p_product_id is null then
+    raise exception 'Choose a product first.';
+  end if;
+
+  if coalesce(p_cost, 0) <= 0 then
+    raise exception 'Invalid chat cost.';
+  end if;
+
+  if nullif(trim(p_initial_message), '') is null then
+    raise exception 'Write a private chat message first.';
+  end if;
+
+  if not exists (
+    select 1
+    from public.owned_products
+    where owned_products.product_id = p_product_id
+      and owned_products.user_id = p_owner_id
+      and owned_products.verification_status in ('photo_verified', 'receipt_verified', 'trusted_owner')
+  ) then
+    raise exception 'Choose a verified owner of this product.';
+  end if;
+
+  select credit_balance
+  into buyer_credits
+  from public.profiles
+  where id = p_buyer_id
+  for update;
+
+  if not found then
+    raise exception 'Could not load your credits.';
+  end if;
+
+  if buyer_credits < p_cost then
+    raise exception 'Insufficient credits.';
+  end if;
+
+  perform set_config('ownercheck.secure_credit_flow', 'on', true);
+
+  update public.profiles
+  set credit_balance = credit_balance - p_cost
+  where id = p_buyer_id;
+
+  insert into public.credit_transactions (
+    user_id,
+    amount,
+    reason
+  )
+  values (
+    p_buyer_id,
+    -p_cost,
+    'Started a private chat'
+  );
+
+  insert into public.chats (
+    product_id,
+    buyer_id,
+    owner_id
+  )
+  values (
+    p_product_id,
+    p_buyer_id,
+    p_owner_id
+  )
+  returning id into created_chat_id;
+
+  insert into public.chat_participants (chat_id, user_id, role)
+  values
+    (created_chat_id, p_buyer_id, 'buyer'),
+    (created_chat_id, p_owner_id, 'owner');
+
+  insert into public.chat_messages (chat_id, sender_id, message_text)
+  values (created_chat_id, p_buyer_id, trim(p_initial_message));
+
+  return created_chat_id;
+end;
+$$;
+
+grant execute on function public.create_direct_chat_transaction(uuid, uuid, uuid, text, integer) to authenticated;
+
+drop function if exists public.merge_duplicate_product(uuid, uuid);
+
+create or replace function public.merge_duplicate_product(
+  p_canonical_id uuid,
+  p_duplicate_id uuid
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.is_admin() then
+    raise exception 'Only admins can merge products.';
+  end if;
+
+  if p_canonical_id is null or p_duplicate_id is null then
+    raise exception 'Choose both a canonical product and a duplicate product.';
+  end if;
+
+  if p_canonical_id = p_duplicate_id then
+    raise exception 'Canonical and duplicate products must be different.';
+  end if;
+
+  if not exists (select 1 from public.products where id = p_canonical_id) then
+    raise exception 'Canonical product does not exist.';
+  end if;
+
+  if not exists (select 1 from public.products where id = p_duplicate_id) then
+    raise exception 'Duplicate product does not exist.';
+  end if;
+
+  if exists (
+    select 1
+    from public.products
+    where id = p_canonical_id
+      and product_verification_status = 'duplicate'
+  ) then
+    raise exception 'Cannot merge into a product already marked as duplicate.';
+  end if;
+
+  update public.questions
+  set product_id = p_canonical_id
+  where product_id = p_duplicate_id;
+
+  update public.direct_questions
+  set product_id = p_canonical_id
+  where product_id = p_duplicate_id;
+
+  update public.chats
+  set
+    product_id = p_canonical_id,
+    updated_at = now()
+  where product_id = p_duplicate_id;
+
+  update public.product_submissions
+  set
+    linked_product_id = p_canonical_id,
+    status = case
+      when status = 'approved' then 'duplicate'
+      else status
+    end,
+    reviewed_at = coalesce(reviewed_at, now())
+  where linked_product_id = p_duplicate_id;
+
+  update public.product_import_rows
+  set
+    linked_product_id = case
+      when linked_product_id = p_duplicate_id then p_canonical_id
+      else linked_product_id
+    end,
+    created_product_id = case
+      when created_product_id = p_duplicate_id then p_canonical_id
+      else created_product_id
+    end,
+    updated_at = now()
+  where linked_product_id = p_duplicate_id
+     or created_product_id = p_duplicate_id;
+
+  with duplicate_claims as (
+    select
+      duplicate_claim.id as duplicate_owned_id,
+      canonical_claim.id as canonical_owned_id
+    from public.owned_products duplicate_claim
+    join public.owned_products canonical_claim
+      on canonical_claim.user_id = duplicate_claim.user_id
+     and canonical_claim.product_id = p_canonical_id
+    where duplicate_claim.product_id = p_duplicate_id
+  )
+  update public.answers
+  set owned_product_id = duplicate_claims.canonical_owned_id
+  from duplicate_claims
+  where answers.owned_product_id = duplicate_claims.duplicate_owned_id;
+
+  with duplicate_claims as (
+    select
+      duplicate_claim.id as duplicate_owned_id,
+      canonical_claim.id as canonical_owned_id
+    from public.owned_products duplicate_claim
+    join public.owned_products canonical_claim
+      on canonical_claim.user_id = duplicate_claim.user_id
+     and canonical_claim.product_id = p_canonical_id
+    where duplicate_claim.product_id = p_duplicate_id
+  )
+  delete from public.owner_product_ratings rating
+  using duplicate_claims
+  where rating.owned_product_id = duplicate_claims.duplicate_owned_id
+    and exists (
+      select 1
+      from public.owner_product_ratings canonical_rating
+      where canonical_rating.user_id = rating.user_id
+        and canonical_rating.product_id = p_canonical_id
+    );
+
+  with duplicate_claims as (
+    select
+      duplicate_claim.id as duplicate_owned_id,
+      canonical_claim.id as canonical_owned_id
+    from public.owned_products duplicate_claim
+    join public.owned_products canonical_claim
+      on canonical_claim.user_id = duplicate_claim.user_id
+     and canonical_claim.product_id = p_canonical_id
+    where duplicate_claim.product_id = p_duplicate_id
+  )
+  update public.owner_product_ratings rating
+  set
+    product_id = p_canonical_id,
+    owned_product_id = duplicate_claims.canonical_owned_id,
+    updated_at = now()
+  from duplicate_claims
+  where rating.owned_product_id = duplicate_claims.duplicate_owned_id;
+
+  delete from public.owned_products duplicate_claim
+  where duplicate_claim.product_id = p_duplicate_id
+    and exists (
+      select 1
+      from public.owned_products canonical_claim
+      where canonical_claim.user_id = duplicate_claim.user_id
+        and canonical_claim.product_id = p_canonical_id
+    );
+
+  delete from public.owner_product_ratings duplicate_rating
+  where duplicate_rating.product_id = p_duplicate_id
+    and exists (
+      select 1
+      from public.owner_product_ratings canonical_rating
+      where canonical_rating.user_id = duplicate_rating.user_id
+        and canonical_rating.product_id = p_canonical_id
+    );
+
+  update public.owned_products
+  set product_id = p_canonical_id
+  where product_id = p_duplicate_id;
+
+  update public.owner_product_ratings
+  set
+    product_id = p_canonical_id,
+    updated_at = now()
+  where product_id = p_duplicate_id;
+
+  update public.products
+  set
+    product_verification_status = 'duplicate',
+    canonical_id = p_canonical_id,
+    duplicate_of_product_id = p_canonical_id,
+    duplicate_reviewed_at = coalesce(duplicate_reviewed_at, now())
+  where id = p_duplicate_id;
+end;
+$$;
+
+grant execute on function public.merge_duplicate_product(uuid, uuid) to authenticated;
+
 drop function if exists public.answer_direct_question(uuid, text);
 
 create or replace function public.accept_direct_question(
@@ -1439,6 +1734,7 @@ begin
   update public.owned_products
   set
     verification_photo_url = photo_url_input,
+    admin_notes = null,
     verification_status = 'photo_submitted',
     verification_capture_method = 'phone_camera',
     verification_token = null,

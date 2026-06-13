@@ -103,6 +103,9 @@ export default function AdminOwnerVerificationsPage() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [verifications, setVerifications] = useState<OwnerVerification[]>([]);
   const [message, setMessage] = useState("");
+  const [rejectionNotes, setRejectionNotes] = useState<Record<string, string>>(
+    {}
+  );
 
   async function loadVerifications() {
     setLoading(true);
@@ -174,7 +177,8 @@ export default function AdminOwnerVerificationsPage() {
 
   async function updateVerificationStatus(
     ownedProductId: string,
-    status: "photo_verified" | "verification_rejected"
+    status: "photo_verified" | "verification_rejected",
+    adminNotes?: string
   ) {
     setMessage("");
 
@@ -196,7 +200,7 @@ export default function AdminOwnerVerificationsPage() {
 
     const { error } = await supabase
       .from("owned_products")
-      .update({ verification_status: status })
+      .update({ verification_status: status, admin_notes: adminNotes || null })
       .eq("id", ownedProductId);
 
     if (error) {
@@ -441,6 +445,24 @@ export default function AdminOwnerVerificationsPage() {
                     </a>
                   )}
 
+                  <div className="mt-5">
+                    <label className="label" htmlFor={`rejection-note-${verification.id}`}>
+                      Reason for rejection
+                    </label>
+                    <textarea
+                      id={`rejection-note-${verification.id}`}
+                      className="input mt-2 min-h-24"
+                      value={rejectionNotes[verification.id] || ""}
+                      onChange={(event) =>
+                        setRejectionNotes((current) => ({
+                          ...current,
+                          [verification.id]: event.target.value,
+                        }))
+                      }
+                      placeholder="Reason for rejection (visible to user)..."
+                    />
+                  </div>
+
                   <div className="mt-5 flex flex-wrap gap-3">
                     <button
                       type="button"
@@ -461,7 +483,8 @@ export default function AdminOwnerVerificationsPage() {
                       onClick={() =>
                         updateVerificationStatus(
                           verification.id,
-                          "verification_rejected"
+                          "verification_rejected",
+                          rejectionNotes[verification.id]
                         )
                       }
                     >

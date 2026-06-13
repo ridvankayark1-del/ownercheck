@@ -1,12 +1,12 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
-import { AskQuestionForm } from "@/components/AskQuestionForm";
 import { ClaimProductModal } from "@/components/ClaimProductModal";
-import { DirectQuestionForm } from "@/components/DirectQuestionForm";
 import { HelpfulButton } from "@/components/HelpfulButton";
 import { OwnerTrustCard } from "@/components/OwnerTrustCard";
 import { ProductImage } from "@/components/ProductImage";
+import { ProductInsightsTabs } from "@/components/ProductInsightsTabs";
+import { UnifiedQuestionConsole } from "@/components/UnifiedQuestionConsole";
 import { getCategoryProfile } from "@/lib/productCategoryProfiles";
 import { getOwnerEvaluationCriteria } from "@/lib/ownerEvaluationCriteria";
 import {
@@ -558,14 +558,13 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
         ← Back to explore
       </Link>
 
-      <section className="card mt-4 overflow-hidden p-4 md:p-6">
-        <div className="grid gap-6 lg:grid-cols-[420px_1fr] lg:items-stretch">
-          <div className="overflow-hidden rounded-2xl bg-slate-100 shadow-sm">
+      <section className="mt-5 grid gap-7 lg:grid-cols-[380px_1fr] lg:items-center">
+          <div className="overflow-hidden rounded-3xl bg-slate-100">
             <ProductImage
               src={product.image_url}
               category={product.category}
               alt={product.name}
-              className="h-72 w-full object-cover sm:h-96 lg:h-full"
+              className="h-72 w-full object-cover sm:h-96 lg:h-[430px]"
             />
           </div>
 
@@ -617,23 +616,23 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
                 )}
               </div>
 
-              <h1 className="mt-3 text-4xl font-black leading-tight md:text-6xl">
+              <h1 className="mt-3 max-w-3xl text-4xl font-black leading-tight md:text-6xl">
                 {displayName}
               </h1>
 
-              <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <div className="mt-5 flex flex-wrap items-center gap-3 text-sm font-bold text-muted">
                 {[
-                  [
-                    "Verified owners",
-                    photoVerifiedCount,
-                  ],
-                  ["Owner answers", answers?.length || 0],
-                  ["Owner rating", averageRating || "No rating"],
-                  ["Public questions", questions?.length || 0],
-                ].map(([label, value]) => (
-                  <div key={label} className="rounded-2xl border bg-white p-4">
-                    <p className="text-2xl font-black">{value}</p>
-                    <p className="text-xs font-bold text-muted">{label}</p>
+                  [`${photoVerifiedCount}`, "Verified owners"],
+                  [`${answers?.length || 0}`, "Owner answers"],
+                  [averageRating || "No rating", "Owner rating"],
+                  [`${questions?.length || 0}`, "Public questions"],
+                ].map(([value, label], index) => (
+                  <div key={label} className="flex items-center gap-3">
+                    {index > 0 && <span className="h-7 w-px bg-slate-200" />}
+                    <p>
+                      <span className="font-black text-slate-950">{value}</span>{" "}
+                      {label}
+                    </p>
                   </div>
                 ))}
               </div>
@@ -668,10 +667,7 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
                   Ask public question
                 </a>
                 {directOwnerOptions.length > 0 ? (
-                  <a
-                    href="#ask-question"
-                    className="btn btn-dark w-full justify-center sm:w-auto"
-                  >
+                  <a href="#ask-question" className="btn w-full justify-center sm:w-auto">
                     Start private chat
                   </a>
                 ) : (
@@ -710,166 +706,224 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
               </div>
             </div>
           </div>
-        </div>
       </section>
 
-      <section className="mt-5 grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
-        <div className="space-y-5">
-          <section className="card p-5">
-            <div className="flex flex-wrap items-start justify-between gap-4">
+      <section className="mt-8 grid gap-8 lg:grid-cols-[1fr_340px]">
+        <div className="min-w-0 space-y-10">
+          <ProductInsightsTabs
+            scorecard={
               <div>
-                <h2 className="text-2xl font-black">Owner scorecard</h2>
-                <p className="mt-1 text-sm font-black text-muted">
-                  Based on real-owner ratings.
-                </p>
-              </div>
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div>
+                    <h2 className="text-2xl font-black">Owner scorecard</h2>
+                    <p className="mt-1 text-sm font-black text-muted">
+                      Based on real-owner ratings.
+                    </p>
+                  </div>
 
-              <div className="text-right">
-                <p className="text-4xl font-black">
-                  {scorecardOverall ? scorecardOverall.toFixed(1) : "—"}
-                </p>
-                <p className="text-xs font-black text-muted">
-                  {scorecardRatingCount > 0
-                    ? `${scorecardRatingCount} owner ${
-                        scorecardRatingCount === 1 ? "rating" : "ratings"
-                      }`
-                    : "No ratings yet"}
-                </p>
-              </div>
-            </div>
+                  <div className="text-right">
+                    <p className="text-4xl font-black">
+                      {scorecardOverall ? scorecardOverall.toFixed(1) : "-"}
+                    </p>
+                    <p className="text-xs font-black text-muted">
+                      {scorecardRatingCount > 0
+                        ? `${scorecardRatingCount} owner ${
+                            scorecardRatingCount === 1 ? "rating" : "ratings"
+                          }`
+                        : "No ratings yet"}
+                    </p>
+                  </div>
+                </div>
 
-            {scorecardRatingCount > 0 ? (
-              <>
-                {allScorecardsPhotoVerified && (
-                  <span className="mt-3 inline-flex rounded-full bg-emerald-100 px-3 py-1 text-xs font-black text-emerald-800">
-                    Photo-verified owner ratings
-                  </span>
+                {scorecardRatingCount > 0 ? (
+                  <>
+                    {allScorecardsPhotoVerified && (
+                      <span className="mt-3 inline-flex rounded-full bg-emerald-100 px-3 py-1 text-xs font-black text-emerald-800">
+                        Photo-verified owner ratings
+                      </span>
+                    )}
+
+                    <div className="mt-4 grid gap-3 md:grid-cols-2">
+                      {scorecardAverages.map((item) => (
+                        <div
+                          key={item.criterion}
+                          className="rounded-2xl bg-slate-50 p-3"
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="font-black">{item.criterion}</p>
+                            <p className="font-black">
+                              {item.average.toFixed(1)}
+                            </p>
+                          </div>
+                          <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200">
+                            <div
+                              className="h-full rounded-full bg-slate-900"
+                              style={{
+                                width: `${Math.min(item.average * 20, 100)}%`,
+                              }}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <div className="mt-4 rounded-2xl bg-slate-50 p-4">
+                    <p className="font-bold">
+                      Own this product? Add the first owner rating.
+                    </p>
+                    <ClaimProductModal
+                      productId={product.id}
+                      productSlug={product.slug}
+                      category={product.category}
+                      triggerClassName="btn btn-dark mt-3"
+                      triggerLabel="Add owner rating"
+                    />
+                  </div>
+                )}
+              </div>
+            }
+            details={
+              <div>
+                <h2 className="text-2xl font-black">Product details</h2>
+                {snapshotItems.length > 0 || simpleSpecEntries.length > 0 ? (
+                  <div className="mt-4 divide-y divide-slate-200">
+                    {snapshotItems.map(([label, value]) => (
+                      <div
+                        key={label}
+                        className="flex items-start justify-between gap-4 py-3"
+                      >
+                        <p className="text-xs font-black uppercase text-muted">
+                          {label}
+                        </p>
+                        <p className="max-w-md text-right text-sm font-bold">
+                          {value}
+                        </p>
+                      </div>
+                    ))}
+
+                    {simpleSpecEntries.map(([key, value]) => (
+                      <div
+                        key={key}
+                        className="flex items-start justify-between gap-4 py-3"
+                      >
+                        <p className="text-xs font-black uppercase text-muted">
+                          {formatSpecLabel(key)}
+                        </p>
+                        <p className="max-w-md text-right text-sm font-bold">
+                          {cleanDisplayText(value)}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-3 text-muted">
+                    Product details are still being verified.
+                  </p>
                 )}
 
-                <div className="mt-4 grid gap-3 md:grid-cols-2">
-                  {scorecardAverages.map((item) => (
-                    <div key={item.criterion} className="rounded-2xl bg-slate-50 p-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <p className="font-black">{item.criterion}</p>
-                        <p className="font-black">{item.average.toFixed(1)}</p>
-                      </div>
-                      <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200">
-                        <div
-                          className="h-full rounded-full bg-slate-900"
-                          style={{ width: `${Math.min(item.average * 20, 100)}%` }}
-                        />
-                      </div>
+                {mainFeatures.length > 0 && (
+                  <div className="mt-5">
+                    <h3 className="font-black">Main features</h3>
+                    <ul className="mt-2 flex flex-wrap gap-2 text-xs font-bold">
+                      {mainFeatures.map((item) => (
+                        <li
+                          key={item}
+                          className="rounded-full bg-slate-100 px-3 py-1"
+                        >
+                          {item}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {bestFor.length > 0 && (
+                  <div className="mt-5">
+                    <h3 className="font-black">Best for</h3>
+                    <ul className="mt-2 flex flex-wrap gap-2 text-xs font-bold">
+                      {bestFor.map((item) => (
+                        <li
+                          key={item}
+                          className="rounded-full bg-slate-100 px-3 py-1"
+                        >
+                          {item}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {externalSourceLinks.length > 0 && (
+                  <details
+                    id="external-sources"
+                    className="mt-5 rounded-2xl bg-slate-50 p-3"
+                  >
+                    <summary className="cursor-pointer text-sm font-black">
+                      External sources
+                    </summary>
+                    <p className="mt-2 text-xs font-bold leading-5 text-muted">
+                      Used for product facts and source discovery. OwnerCheck
+                      real-owner answers are separate.
+                    </p>
+                    <div className="mt-3 flex flex-wrap gap-2 text-xs font-bold">
+                      {externalSourceLinks.slice(0, 8).map((link) => (
+                        <a
+                          key={link.url}
+                          href={link.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="underline"
+                        >
+                          {link.title}
+                        </a>
+                      ))}
                     </div>
-                  ))}
-                </div>
-              </>
-            ) : (
-              <div className="mt-4 rounded-2xl bg-slate-50 p-4">
-                <p className="font-bold">Own this product? Add the first owner rating.</p>
-                <ClaimProductModal
-                  productId={product.id}
-                  productSlug={product.slug}
-                  category={product.category}
-                  triggerClassName="btn btn-dark mt-3"
-                  triggerLabel="Add owner rating"
-                />
+                  </details>
+                )}
               </div>
-            )}
-          </section>
-
-          {checkBeforeBuying.length > 0 && (
-            <section className="card p-5">
-              <div className="flex flex-wrap items-center justify-between gap-3">
+            }
+            buyingChecks={
+              checkBeforeBuying.length > 0 ? (
                 <div>
-                  <h2 className="text-2xl font-black">Check before buying</h2>
-                  <p className="mt-1 text-sm font-bold text-muted">
-                    Use these as prompts when asking owners.
-                  </p>
-                </div>
-                <a href="#ask-question" className="btn">
-                  Ask owners about these
-                </a>
-              </div>
-              <ul className="mt-4 flex flex-wrap gap-2 text-sm font-bold">
-                {checkBeforeBuying.map((item) => (
-                  <li key={item}>
-                    <a
-                      href="#ask-question"
-                      className="inline-flex rounded-full bg-slate-100 px-3 py-2"
-                    >
-                      {item}
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h2 className="text-2xl font-black">
+                        Check before buying
+                      </h2>
+                      <p className="mt-1 text-sm font-bold text-muted">
+                        Use these as prompts when asking owners.
+                      </p>
+                    </div>
+                    <a href="#ask-question" className="btn">
+                      Ask owners about these
                     </a>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          )}
+                  </div>
+                  <ul className="mt-4 flex flex-wrap gap-2 text-sm font-bold">
+                    {checkBeforeBuying.map((item) => (
+                      <li key={item}>
+                        <a
+                          href="#ask-question"
+                          className="inline-flex rounded-full bg-slate-100 px-3 py-2"
+                        >
+                          {item}
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : undefined
+            }
+          />
 
-          <section id="ask-question">
-            <div className="mb-4">
-              <h2 className="text-2xl font-black">Ask real owners</h2>
-              <p className="mt-2 max-w-2xl leading-7 text-muted">
-                Pick the public route when many buyers could use the answer, or
-                start a private chat when your question is specific to your own
-                situation.
-              </p>
-            </div>
-
-            <div className="grid gap-5 lg:grid-cols-2">
-              <AskQuestionForm
-                productId={product.id}
-                starterQuestions={starterQuestions}
-              />
-              <DirectQuestionForm
-                productId={product.id}
-                ownerOptions={directOwnerOptions}
-              />
-            </div>
-          </section>
-
-          <section className="card p-5">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <p className="font-bold text-muted">Owner insight</p>
-                <h2 className="mt-1 text-2xl font-black">
-                  What owners are saying
-                </h2>
-              </div>
-              <span className="trust-badge trust-badge-neutral">
-                Real-owner signals
-              </span>
-            </div>
-
-            {mostHelpfulAnswer ? (
-              <div className="mt-4 rounded-2xl bg-[var(--surface-soft)] p-4">
-                <p className="text-sm font-black text-muted">
-                  Most helpful answer by {getProfileName(mostHelpfulOwner)}
-                </p>
-                <p className="mt-2 line-clamp-3 leading-7">
-                  {mostHelpfulAnswer.answer_text}
-                </p>
-                <p className="mt-3 text-sm font-bold text-muted">
-                  {mostHelpfulAnswer.helpful_count} helpful votes
-                </p>
-              </div>
-            ) : (
-              <div className="mt-4 rounded-2xl bg-[var(--surface-soft)] p-4">
-                <p className="font-bold">
-                  No owner insights yet. Ask the first question.
-                </p>
-                <a href="#ask-question" className="btn btn-dark mt-3">
-                  Ask a public question
-                </a>
-              </div>
-            )}
-          </section>
-
-          <section className="card p-5">
+          <section>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h2 className="text-2xl font-black">Questions for real owners</h2>
+                <h2 className="text-2xl font-black">
+                  Questions for real owners
+                </h2>
                 <p className="mt-1 text-sm font-bold text-muted">
-                  {answeredQuestionCount} answered · {questions?.length || 0} total
+                  {answeredQuestionCount} answered / {questions?.length || 0} total
                 </p>
               </div>
               <a href="#ask-question" className="btn btn-dark">
@@ -878,14 +932,16 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
             </div>
 
             {!questions || questions.length === 0 ? (
-              <div className="mt-4 rounded-2xl bg-slate-50 p-4">
-                <p className="font-bold">No one has asked about this product yet.</p>
+              <div className="mt-5 rounded-2xl bg-slate-50 p-5">
+                <p className="font-bold">
+                  No one has asked about this product yet.
+                </p>
                 <a href="#ask-question" className="btn btn-dark mt-3">
                   Ask the first question
                 </a>
               </div>
             ) : (
-              <div className="mt-5 space-y-4">
+              <div className="mt-5 divide-y divide-slate-200">
                 {questions.map((question: Question) => {
                   const questionAnswers = getAnswersForQuestion(question.id);
                   const buyerProfile = question.buyer_id
@@ -893,21 +949,17 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
                     : undefined;
 
                   return (
-                    <div
-                      key={question.id}
-                      className={`rounded-2xl border p-4 ${
-                        questionAnswers.length > 0
-                          ? "border-emerald-200 bg-emerald-50/30"
-                          : "border-amber-200 bg-amber-50/30"
-                      }`}
-                    >
-                      <p className="font-black">{question.question_text}</p>
-                      <p className="mt-2 text-sm text-muted">
-                        Asked by {getProfileName(buyerProfile)} · Reward:{" "}
-                        {question.credit_reward} credits · {question.status}
-                      </p>
-
-                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <article key={question.id} className="py-5">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <p className="font-black">
+                            {question.question_text}
+                          </p>
+                          <p className="mt-2 text-sm text-muted">
+                            Asked by {getProfileName(buyerProfile)} / Reward:{" "}
+                            {question.credit_reward} credits / {question.status}
+                          </p>
+                        </div>
                         <span
                           className={`rounded-full px-3 py-1 text-xs font-black ${
                             questionAnswers.length > 0
@@ -919,14 +971,9 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
                             ? "Answered"
                             : "Waiting for verified owner"}
                         </span>
-                        {questionAnswers.length === 0 && (
-                          <span className="text-sm font-bold text-amber-900">
-                            Waiting for a verified owner answer.
-                          </span>
-                        )}
                       </div>
 
-                      {questionAnswers.length > 0 && (
+                      {questionAnswers.length > 0 ? (
                         <div className="mt-4 space-y-3">
                           {questionAnswers.map((answer: Answer) => {
                             const answerProfile = answer.owner_id
@@ -955,7 +1002,7 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
                             return (
                               <div
                                 key={answer.id}
-                                className="rounded-2xl bg-white p-4"
+                                className="rounded-2xl bg-slate-50 p-4"
                               >
                                 <OwnerTrustCard
                                   name={getProfileName(answerProfile)}
@@ -973,15 +1020,15 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
                                   scorecardRating={
                                     answerOwnerRating?.overall_rating
                                   }
-                                  answerCount={
-                                    answerOwnerActivity.answerCount
-                                  }
+                                  answerCount={answerOwnerActivity.answerCount}
                                   helpfulCount={
                                     answerOwnerActivity.helpfulCount
                                   }
                                   compact
                                 />
-                                <p className="mt-3 leading-7">{answer.answer_text}</p>
+                                <p className="mt-3 leading-7">
+                                  {answer.answer_text}
+                                </p>
                                 <HelpfulButton
                                   answerId={answer.id}
                                   ownerId={answer.owner_id}
@@ -991,10 +1038,11 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
                             );
                           })}
                         </div>
-                      )}
-
-                      {questionAnswers.length === 0 && (
+                      ) : (
                         <div className="mt-4 flex flex-wrap items-center gap-3">
+                          <span className="text-sm font-bold text-amber-900">
+                            Waiting for a verified owner answer.
+                          </span>
                           <Link
                             href={`/owner/questions/${question.id}`}
                             className="btn btn-dark"
@@ -1003,14 +1051,14 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
                           </Link>
                         </div>
                       )}
-                    </div>
+                    </article>
                   );
                 })}
               </div>
             )}
           </section>
 
-          <section className="card p-5">
+          <section>
             <h2 className="text-2xl font-black">Real-owner evaluations</h2>
 
             {!ownedProducts || ownedProducts.length === 0 ? (
@@ -1018,7 +1066,7 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
                 No real owners have claimed this product yet. Be the first owner.
               </p>
             ) : (
-              <div className="mt-4 grid gap-4 md:grid-cols-2">
+              <div className="mt-5 grid gap-4 md:grid-cols-2">
                 {ownedProducts.map((ownedProduct: OwnedProduct) => {
                   const ownerProfile = ownedProduct.user_id
                     ? profileMap.get(ownedProduct.user_id)
@@ -1027,72 +1075,45 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
                     ownedProduct.verification_status,
                     ownerProfile?.trust_score
                   );
-	                  const helpfulActivity = getOwnerHelpfulActivity(
-	                    ownedProduct.user_id
-	                  );
-                    const ownerRating = (
-                      (ownerProductRatings || []) as OwnerProductRating[]
-                    ).find(
-                      (rating) =>
-                        rating.owned_product_id === ownedProduct.id ||
-                        rating.user_id === ownedProduct.user_id
-                    );
+                  const helpfulActivity = getOwnerHelpfulActivity(
+                    ownedProduct.user_id
+                  );
+                  const ownerRating = (
+                    (ownerProductRatings || []) as OwnerProductRating[]
+                  ).find(
+                    (rating) =>
+                      rating.owned_product_id === ownedProduct.id ||
+                      rating.user_id === ownedProduct.user_id
+                  );
 
-	                  return (
-	                    <div key={ownedProduct.id} className="rounded-2xl border p-4">
-                        <OwnerTrustCard
-                          name={getProfileName(ownerProfile)}
-                          ownerLevel={getOwnerLevelLabel(ownerLevel)}
-                          photoVerified={
-                            ownedProduct.verification_status ===
-                            "photo_verified"
-                          }
-                          ownershipMonths={ownedProduct.ownership_months}
-                          rating={ownedProduct.rating}
-                          scorecardRating={ownerRating?.overall_rating}
-                          answerCount={helpfulActivity.answerCount}
-                          helpfulCount={helpfulActivity.helpfulCount}
-                          compact
-                        />
-
-	                      <div className="mt-3 hidden flex-wrap items-center gap-2">
-                        <span
-                          className={`rounded-full px-3 py-1 text-xs font-black ${getOwnerLevelBadgeClass(
-                            ownerLevel
-                          )}`}
-                        >
-                          {getOwnerLevelLabel(ownerLevel)}
-                        </span>
-
-                        <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
-                          Trust {ownerProfile?.trust_score ?? 0}
-                        </span>
-
-                        <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
-                          {ownedProduct.ownership_months || 0} months owned
-                        </span>
-
-                        {ownedProduct.rating && (
-                          <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
-                            {ownedProduct.rating}/5 rating
-                          </span>
-                        )}
-
-                        {helpfulActivity.answerCount > 0 && (
-                          <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
-                            {helpfulActivity.answerCount} answers ·{" "}
-                            {helpfulActivity.helpfulCount} helpful
-                          </span>
-                        )}
-                      </div>
+                  return (
+                    <article
+                      key={ownedProduct.id}
+                      className="rounded-2xl bg-slate-50 p-4"
+                    >
+                      <OwnerTrustCard
+                        name={getProfileName(ownerProfile)}
+                        ownerLevel={getOwnerLevelLabel(ownerLevel)}
+                        photoVerified={
+                          ownedProduct.verification_status === "photo_verified"
+                        }
+                        ownershipMonths={ownedProduct.ownership_months}
+                        rating={ownedProduct.rating}
+                        scorecardRating={ownerRating?.overall_rating}
+                        answerCount={helpfulActivity.answerCount}
+                        helpfulCount={helpfulActivity.helpfulCount}
+                        compact
+                      />
 
                       {ownedProduct.review_text && (
-                        <p className="mt-3 leading-7">{ownedProduct.review_text}</p>
+                        <p className="mt-3 leading-7">
+                          {ownedProduct.review_text}
+                        </p>
                       )}
 
                       <div className="mt-4 grid gap-3 md:grid-cols-2">
                         {ownedProduct.pros && (
-                          <div className="rounded-2xl bg-slate-50 p-3">
+                          <div>
                             <p className="text-xs font-black uppercase text-muted">
                               Pros
                             </p>
@@ -1101,7 +1122,7 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
                         )}
 
                         {ownedProduct.cons && (
-                          <div className="rounded-2xl bg-slate-50 p-3">
+                          <div>
                             <p className="text-xs font-black uppercase text-muted">
                               Cons
                             </p>
@@ -1115,10 +1136,10 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
                         {ownedProduct.would_buy_again === true
                           ? "Yes"
                           : ownedProduct.would_buy_again === false
-                          ? "No"
-                          : "Not sure"}
+                            ? "No"
+                            : "Not sure"}
                       </p>
-                    </div>
+                    </article>
                   );
                 })}
               </div>
@@ -1126,97 +1147,16 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
           </section>
         </div>
 
-        <aside className="space-y-5 lg:sticky lg:top-4 lg:self-start">
-          {productSpecs && (
-            <section className="card p-5">
-	              <h2 className="text-xl font-black">Product details</h2>
-	              {snapshotItems.length > 0 && (
-	                <div className="mt-4 divide-y rounded-2xl bg-slate-50">
-	                  {snapshotItems.map(([label, value]) => (
-	                    <div
-                        key={label}
-                        className="flex items-start justify-between gap-4 p-3"
-                      >
-	                      <p className="text-xs font-black uppercase text-muted">
-	                        {label}
-	                      </p>
-	                      <p className="text-right text-sm font-bold">{value}</p>
-	                    </div>
-	                  ))}
-
-	                  {simpleSpecEntries.map(([key, value]) => (
-	                    <div
-                        key={key}
-                        className="flex items-start justify-between gap-4 p-3"
-                      >
-	                      <p className="text-xs font-black uppercase text-muted">
-	                        {formatSpecLabel(key)}
-	                      </p>
-	                      <p className="text-right text-sm font-bold">
-	                        {cleanDisplayText(value)}
-	                      </p>
-	                    </div>
-	                  ))}
-                </div>
-              )}
-
-              {mainFeatures.length > 0 && (
-                <div className="mt-4">
-                  <h3 className="font-black">Main features</h3>
-                  <ul className="mt-2 flex flex-wrap gap-2 text-xs font-bold">
-                    {mainFeatures.map((item) => (
-                      <li key={item} className="rounded-full bg-slate-100 px-3 py-1">
-                        {item}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-
-              {bestFor.length > 0 && (
-                <div className="mt-4">
-                  <h3 className="font-black">Best for</h3>
-                  <ul className="mt-2 flex flex-wrap gap-2 text-xs font-bold">
-                    {bestFor.map((item) => (
-                      <li key={item} className="rounded-full bg-slate-100 px-3 py-1">
-                        {item}
-                      </li>
-                    ))}
-	                  </ul>
-	                </div>
-	              )}
-
-                {externalSourceLinks.length > 0 && (
-                  <details id="external-sources" className="mt-5 rounded-2xl bg-slate-50 p-3">
-                    <summary className="cursor-pointer text-sm font-black">
-                      External sources
-                    </summary>
-                    <p className="mt-2 text-xs font-bold leading-5 text-muted">
-                      Used for product facts and source discovery. OwnerCheck
-                      real-owner answers are separate.
-                    </p>
-                    <div className="mt-3 flex flex-wrap gap-2 text-xs font-bold">
-                      {externalSourceLinks.slice(0, 8).map((link) => (
-                        <a
-                          key={link.url}
-                          href={link.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="underline"
-                        >
-                          {link.title}
-                        </a>
-                      ))}
-                    </div>
-                  </details>
-                )}
-	            </section>
-	          )}
-
+        <aside className="lg:sticky lg:top-6 lg:self-start">
+          <UnifiedQuestionConsole
+            productId={product.id}
+            starterQuestions={starterQuestions}
+            ownerOptions={directOwnerOptions}
+          />
         </aside>
       </section>
 
-	      <div className="fixed inset-x-0 bottom-0 z-30 border-t bg-white/95 p-3 shadow-lg backdrop-blur md:hidden">
+      <div className="fixed inset-x-0 bottom-0 z-30 border-t bg-white/95 p-3 shadow-lg backdrop-blur md:hidden">
         <div className="mx-auto grid max-w-6xl grid-cols-2 gap-3">
           <a href="#ask-question" className="btn btn-dark justify-center">
             Ask owners

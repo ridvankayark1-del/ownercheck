@@ -20,6 +20,7 @@ type RawOwnedProduct = {
   ownership_months: number | null;
   verification_status: string;
   verification_photo_url: string | null;
+  admin_notes: string | null;
   rating: number | null;
   review_text: string | null;
   created_at: string;
@@ -103,7 +104,7 @@ export async function GET(request: NextRequest) {
       await supabase
         .from("owned_products")
         .select(
-          "id, product_id, ownership_months, verification_status, verification_photo_url, rating, review_text, created_at, products(slug, name, brand, category, image_url)"
+          "id, product_id, ownership_months, verification_status, verification_photo_url, admin_notes, rating, review_text, created_at, products(slug, name, brand, category, image_url)"
         )
         .eq("user_id", user.id)
         .order("created_at", { ascending: false });

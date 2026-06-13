@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabaseClient";
 import { ProductImage } from "@/components/ProductImage";
@@ -86,6 +86,21 @@ export default function ChatPage({ params }: PageProps) {
   const [messageText, setMessageText] = useState("");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+
+    if (!chatId || !data?.messages.length) {
+      return;
+    }
+
+    const latestMessage = data.messages[data.messages.length - 1];
+    window.localStorage.setItem(
+      `ownercheck:chatSeen:${chatId}`,
+      latestMessage.created_at
+    );
+  }, [data?.messages]);
 
   async function getSessionToken() {
     const {
@@ -156,8 +171,39 @@ export default function ChatPage({ params }: PageProps) {
           table: "chat_messages",
           filter: `chat_id=eq.${chatId}`,
         },
-        async () => {
-          await loadChat(chatId, true);
+        (payload) => {
+          const incoming = payload.new as Partial<ChatMessage>;
+
+          setData((currentData) => {
+            if (!currentData || !incoming.id || !incoming.sender_id) {
+              return currentData;
+            }
+
+            if (currentData.messages.some((item) => item.id === incoming.id)) {
+              return currentData;
+            }
+
+            const sender = currentData.participants.find(
+              (participant) => participant.user_id === incoming.sender_id
+            );
+            const nextMessage: ChatMessage = {
+              id: incoming.id,
+              chat_id: incoming.chat_id || chatId,
+              sender_id: incoming.sender_id,
+              message_text: incoming.message_text || "",
+              created_at: incoming.created_at || new Date().toISOString(),
+              profiles: sender?.profiles || null,
+            };
+
+            if (nextMessage.chat_id !== currentData.chat.id) {
+              return currentData;
+            }
+
+            return {
+              ...currentData,
+              messages: [...currentData.messages, nextMessage],
+            };
+          });
         }
       )
       .subscribe();
@@ -203,7 +249,7 @@ export default function ChatPage({ params }: PageProps) {
 
     setMessageText("");
     setSaving(false);
-    await loadChat(chatId);
+    await loadChat(chatId, true);
   }
 
   const viewerIsOwner = data?.viewer.id === data?.chat.owner_id;
@@ -236,7 +282,10 @@ export default function ChatPage({ params }: PageProps) {
           <p className="mt-3 text-muted">
             Private chats are visible only to the buyer and selected owner.
           </p>
-          <Link href={`/auth?redirect=/chats/${chatId}`} className="btn btn-dark mt-5">
+          <Link
+            href={`/auth?redirect=/chats/${chatId}`}
+            className="btn btn-dark mt-5"
+          >
             Log in
           </Link>
         </div>
@@ -264,11 +313,11 @@ export default function ChatPage({ params }: PageProps) {
 
   return (
     <main className="mx-auto max-w-5xl px-5 py-12">
-      <section className="card overflow-hidden p-0">
-        <div className="border-b bg-white p-5 md:p-6">
+      <section className="card flex h-[80vh] flex-col overflow-hidden p-0">
+        <div className="shrink-0 border-b bg-white p-5 md:p-6">
           <div className="flex flex-col gap-5 md:flex-row md:items-center md:justify-between">
             <div className="flex gap-4">
-              <div className="h-24 w-24 shrink-0 overflow-hidden rounded-2xl bg-slate-100 md:h-28 md:w-28">
+              <div className="h-16 w-16 shrink-0 overflow-hidden rounded-xl bg-slate-100 md:h-20 md:w-20">
                 {data.chat.products ? (
                   <ProductImage
                     src={data.chat.products.image_url}
@@ -283,49 +332,54 @@ export default function ChatPage({ params }: PageProps) {
                 )}
               </div>
               <div>
-                <p className="font-bold text-muted">Private Chat</p>
-                <h1 className="mt-1 text-3xl font-black leading-tight">
+                <p className="text-xs font-bold uppercase tracking-wider text-muted">
+                  Private Chat
+                </p>
+                <h1 className="mt-1 text-xl font-black leading-tight">
                   {data.chat.products?.name || "Direct request"}
                 </h1>
-                <div className="mt-3 flex flex-wrap items-center gap-2">
-                  <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-black text-emerald-800">
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <span className="rounded-full bg-emerald-50 px-2.5 py-0.5 text-[10px] font-black text-emerald-800">
                     Private chat with verified owner
                   </span>
-                  <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
+                  <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-[10px] font-black text-slate-700">
                     Buyer: {buyerName}
                   </span>
-                  <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">
+                  <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-[10px] font-black text-slate-700">
                     Owner: {ownerName}
                   </span>
                 </div>
               </div>
             </div>
 
-            <div className="flex flex-wrap gap-3">
+            <div className="flex flex-wrap gap-2">
               {data.chat.products?.slug && (
-                <Link href={`/product/${data.chat.products.slug}`} className="btn">
+                <Link
+                  href={`/product/${data.chat.products.slug}`}
+                  className="btn text-xs py-1.5"
+                >
                   View product
                 </Link>
               )}
-              <Link href={backHref} className="btn btn-dark">
+              <Link href={backHref} className="btn btn-dark text-xs py-1.5">
                 {backLabel}
               </Link>
             </div>
           </div>
 
           {data.chat.direct_questions?.question_text && (
-            <div className="mt-5 rounded-2xl bg-slate-50 p-4">
-              <p className="text-xs font-black uppercase text-muted">
+            <details className="mt-4 rounded-2xl bg-slate-50 p-3">
+              <summary className="cursor-pointer text-xs font-black uppercase text-muted">
                 Original direct request
-              </p>
+              </summary>
               <p className="mt-2 text-sm font-bold leading-6 text-slate-700">
                 {data.chat.direct_questions.question_text}
               </p>
-            </div>
+            </details>
           )}
         </div>
 
-        <div className="space-y-5 bg-slate-50 p-4 md:p-6">
+        <div className="flex-1 space-y-5 overflow-y-auto bg-slate-50 p-4 md:p-6">
           {data.messages.map((item) => {
             const sentByViewer = item.sender_id === data.viewer.id;
 
@@ -335,54 +389,57 @@ export default function ChatPage({ params }: PageProps) {
                 className={`flex ${sentByViewer ? "justify-end" : "justify-start"}`}
               >
                 <article
-                  className={`max-w-[82%] rounded-2xl px-4 py-3 shadow-sm md:max-w-[70%] ${
+                  className={`max-w-[82%] rounded-2xl px-4 py-3 shadow-sm md:max-w-[60%] ${
                     sentByViewer
-                      ? "rounded-br-md bg-black text-white"
-                      : "rounded-bl-md bg-white"
+                      ? "rounded-br-sm bg-slate-950 text-white"
+                      : "rounded-bl-sm border border-slate-200 bg-white text-slate-900"
                   }`}
                 >
-                  <div className="flex flex-wrap items-center justify-between gap-3 text-xs font-black">
+                  <div className="flex flex-wrap items-center justify-between gap-3 text-[10px] font-bold">
                     <span>
                       {sentByViewer ? "You" : getName(item.profiles, "Participant")}
                     </span>
-                    <span className={sentByViewer ? "text-slate-300" : "text-muted"}>
+                    <span className={sentByViewer ? "text-slate-300" : "text-slate-400"}>
                       {formatTime(item.created_at)}
                     </span>
                   </div>
-                  <p className="mt-2 whitespace-pre-wrap leading-7">
+                  <p className="mt-1.5 whitespace-pre-wrap text-sm leading-relaxed">
                     {item.message_text}
                   </p>
                 </article>
               </div>
             );
           })}
+          <div ref={messagesEndRef} />
         </div>
 
         {message && (
-          <p className="mx-5 mt-5 rounded-2xl bg-slate-100 p-4 text-sm font-bold">
+          <p className="mx-5 mt-3 rounded-xl bg-red-50 p-3 text-xs font-bold text-red-600">
             {message}
           </p>
         )}
 
-        <div className="border-t bg-white p-5 md:p-6">
-          <label className="label">Message</label>
-          <textarea
-            className="input mt-2 min-h-28"
-            value={messageText}
-            onChange={(event) => setMessageText(event.target.value)}
-            placeholder="Write a private reply about ownership, fit, usage, or buying advice..."
-          />
-          <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-            <p className="text-xs font-bold text-muted">
-              Only the buyer and selected owner can view this chat.
-            </p>
+        <div className="shrink-0 border-t bg-white p-4">
+          <div className="flex items-end gap-3">
+            <textarea
+              className="input max-h-[120px] min-h-[60px] resize-y"
+              value={messageText}
+              onChange={(event) => setMessageText(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  sendMessage();
+                }
+              }}
+              placeholder="Type your message... (Press Enter to send)"
+            />
             <button
               type="button"
-              className="btn btn-dark"
+              className="btn btn-dark h-[60px] px-6"
               onClick={sendMessage}
               disabled={saving}
             >
-              {saving ? "Sending..." : "Send message"}
+              {saving ? "..." : "Send"}
             </button>
           </div>
         </div>

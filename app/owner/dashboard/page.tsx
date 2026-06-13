@@ -32,6 +32,7 @@ type OwnedProduct = {
   ownership_months: number | null;
   verification_status: string;
   verification_photo_url: string | null;
+  admin_notes: string | null;
   rating: number | null;
   review_text: string | null;
   created_at: string;
@@ -169,6 +170,9 @@ export default function OwnerDashboardPage() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const [savingDirectId, setSavingDirectId] = useState("");
+  const [activeTab, setActiveTab] = useState<
+    "overview" | "products" | "questions"
+  >("overview");
 
   useEffect(() => {
     async function loadDashboard() {
@@ -373,6 +377,30 @@ export default function OwnerDashboardPage() {
           </div>
         </div>
 
+        <div className="mt-6 flex flex-wrap gap-2">
+          {[
+            { id: "overview", label: "Overview" },
+            { id: "products", label: "My Products" },
+            { id: "questions", label: "Questions" },
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              className={`rounded-full px-4 py-2 text-sm font-black transition ${
+                activeTab === tab.id
+                  ? "bg-black text-white"
+                  : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+              }`}
+              onClick={() =>
+                setActiveTab(tab.id as "overview" | "products" | "questions")
+              }
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        {activeTab === "overview" && (
         <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-6">
           <div className="rounded-2xl bg-slate-50 p-4">
             <p className="text-2xl font-black">
@@ -411,8 +439,10 @@ export default function OwnerDashboardPage() {
             <p className="text-sm font-bold text-muted">Verified claims</p>
           </div>
         </div>
+        )}
       </section>
 
+      {activeTab === "overview" && (
       <section id="owner-workbench" className="card mt-6 p-6">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
@@ -537,9 +567,12 @@ export default function OwnerDashboardPage() {
           )}
         </div>
       </section>
+      )}
 
+      {activeTab !== "overview" && (
       <section className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
         <div className="space-y-6">
+          {activeTab === "products" && (
           <section className="card p-6">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
@@ -662,6 +695,14 @@ export default function OwnerDashboardPage() {
                         </p>
                       )}
 
+                      {item.verification_status === "verification_rejected" && (
+                        <p className="mt-3 rounded-2xl bg-red-50 p-3 text-sm font-bold text-red-800">
+                          Verification rejected. Reason:{" "}
+                          {item.admin_notes ||
+                            "Please ensure your photo clearly shows the product."}
+                        </p>
+                      )}
+
                       <div className="mt-4 flex flex-wrap gap-3">
                         {product?.slug && (
                           <>
@@ -701,7 +742,10 @@ export default function OwnerDashboardPage() {
               </div>
             )}
           </section>
+          )}
 
+          {activeTab === "questions" && (
+          <>
           <section className="card p-6">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
@@ -886,9 +930,12 @@ export default function OwnerDashboardPage() {
               </div>
             )}
           </section>
+          </>
+          )}
         </div>
 
         <aside className="space-y-6 lg:sticky lg:top-24 lg:self-start">
+          {activeTab === "questions" && (
           <section className="card p-6">
             <h2 className="text-xl font-black">Credibility</h2>
             <p className="mt-2 text-sm leading-6 text-muted">
@@ -914,7 +961,9 @@ export default function OwnerDashboardPage() {
               </div>
             </div>
           </section>
+          )}
 
+          {activeTab === "products" && (
           <section className="card p-6">
             <h2 className="text-xl font-black">Verification</h2>
             {productsNeedingVerification.length === 0 &&
@@ -950,8 +999,10 @@ export default function OwnerDashboardPage() {
               </div>
             )}
           </section>
+          )}
         </aside>
       </section>
+      )}
     </main>
   );
 }

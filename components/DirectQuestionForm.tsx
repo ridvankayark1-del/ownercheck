@@ -1,8 +1,8 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { supabase } from "@/lib/supabaseClient";
 import { OwnerTrustCard } from "@/components/OwnerTrustCard";
+import { supabase } from "@/lib/supabaseClient";
 
 type OwnerOption = {
   userId: string;
@@ -67,23 +67,32 @@ export function DirectQuestionForm({
       return;
     }
 
-    const { error } = await supabase.rpc("create_direct_question", {
-      product_id_input: productId,
-      selected_owner_id_input: selectedOwnerId,
-      question_text_input: text,
-    });
+    const { data: chatId, error } = await supabase.rpc(
+      "create_direct_chat_transaction",
+      {
+        p_buyer_id: user.id,
+        p_owner_id: selectedOwnerId,
+        p_product_id: productId,
+        p_initial_message: text,
+        p_cost: 25,
+      }
+    );
 
     if (error) {
       setLoading(false);
-      setMessage(error.message || "Could not send private chat request.");
+      setMessage(error.message || "Could not start private chat.");
+      return;
+    }
+
+    if (!chatId) {
+      setLoading(false);
+      setMessage("Could not start private chat.");
       return;
     }
 
     setQuestionText("");
     setLoading(false);
-    setMessage(
-      "Private chat request sent. The selected owner can accept or decline it."
-    );
+    window.location.href = `/chats/${chatId}`;
   }
 
   return (
@@ -101,8 +110,8 @@ export function DirectQuestionForm({
       </div>
 
       <p className="mt-3 text-sm leading-6 text-muted">
-        Choose one verified owner for personal buying advice. If they accept,
-        this opens a private one-to-one chat.
+        Choose one verified owner for personal buying advice. This opens a
+        private one-to-one chat.
       </p>
 
       <div className="mt-4 grid gap-2 text-sm">
@@ -171,7 +180,7 @@ export function DirectQuestionForm({
         onClick={submitDirectQuestion}
         disabled={loading || ownerOptions.length === 0}
       >
-        {loading ? "Sending..." : "Start private chat · 25 credits"}
+        {loading ? "Starting..." : "Start private chat - 25 credits"}
       </button>
 
       {message && (

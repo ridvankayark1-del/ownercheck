@@ -26,6 +26,7 @@ type ExistingClaim = {
   ownership_months: number | null;
   verification_status: string;
   verification_photo_url: string | null;
+  admin_notes: string | null;
   verification_code: string | null;
   verification_token: string | null;
   verification_token_expires_at: string | null;
@@ -143,7 +144,7 @@ export function ClaimProductModal({
       const { data: claim } = await supabase
         .from("owned_products")
         .select(
-          "id, ownership_months, verification_status, verification_photo_url, verification_code, verification_token, verification_token_expires_at, verification_challenge, verification_capture_method, rating, review_text, pros, cons, would_buy_again"
+          "id, ownership_months, verification_status, verification_photo_url, admin_notes, verification_code, verification_token, verification_token_expires_at, verification_challenge, verification_capture_method, rating, review_text, pros, cons, would_buy_again"
         )
         .eq("user_id", user.id)
         .eq("product_id", productId)
@@ -202,7 +203,7 @@ export function ClaimProductModal({
       const { data: claim } = await supabase
         .from("owned_products")
         .select(
-          "id, ownership_months, verification_status, verification_photo_url, verification_code, verification_token, verification_token_expires_at, verification_challenge, verification_capture_method, rating, review_text, pros, cons, would_buy_again"
+          "id, ownership_months, verification_status, verification_photo_url, admin_notes, verification_code, verification_token, verification_token_expires_at, verification_challenge, verification_capture_method, rating, review_text, pros, cons, would_buy_again"
         )
         .eq("user_id", user.id)
         .eq("product_id", productId)
@@ -229,7 +230,11 @@ export function ClaimProductModal({
           .maybeSingle();
 
         setScorecardCompleted(Boolean(ownerRating));
-        setStep("manage");
+        setStep(
+          typedClaim.verification_status === "verification_rejected"
+            ? "verify"
+            : "manage"
+        );
       } else {
         setExistingClaim(null);
         setScorecardCompleted(false);
@@ -267,6 +272,35 @@ export function ClaimProductModal({
 
     const finalVerificationCode = verificationCode || createVerificationCode();
 
+    const { data: currentClaim } = await supabase
+      .from("owned_products")
+      .select(
+        "id, ownership_months, verification_status, verification_photo_url, admin_notes, verification_code, verification_token, verification_token_expires_at, verification_challenge, verification_capture_method, rating, review_text, pros, cons, would_buy_again"
+      )
+      .eq("user_id", user.id)
+      .eq("product_id", productId)
+      .maybeSingle();
+
+    if (currentClaim) {
+      const typedClaim = currentClaim as ExistingClaim;
+      setExistingClaim(typedClaim);
+      setLoading(false);
+
+      if (typedClaim.verification_status === "verification_rejected") {
+        setVerificationCode(typedClaim.verification_code || finalVerificationCode);
+        setVerificationChallenge(
+          typedClaim.verification_challenge || verificationChallenge
+        );
+        setStep("verify");
+        setMessage("Your previous verification was rejected. Re-submit a new photo.");
+        return;
+      }
+
+      setMessage("You already claimed this product. Manage your ownership here.");
+      setStep("manage");
+      return;
+    }
+
     const { data: ownedProduct, error } = await supabase
       .from("owned_products")
       .insert({
@@ -284,7 +318,7 @@ export function ClaimProductModal({
         would_buy_again: wouldBuyAgain === "true",
       })
       .select(
-        "id, ownership_months, verification_status, verification_photo_url, verification_code, verification_token, verification_token_expires_at, verification_challenge, verification_capture_method, rating, review_text, pros, cons, would_buy_again"
+        "id, ownership_months, verification_status, verification_photo_url, admin_notes, verification_code, verification_token, verification_token_expires_at, verification_challenge, verification_capture_method, rating, review_text, pros, cons, would_buy_again"
       )
       .single();
 
@@ -352,13 +386,14 @@ export function ClaimProductModal({
       .update({
         verification_status: nextStatus,
         verification_photo_url: filePath,
+        admin_notes: null,
         verification_code: verificationCode,
         verification_challenge: verificationChallenge,
         verification_capture_method: method,
       })
       .eq("id", existingClaim.id)
       .select(
-        "id, ownership_months, verification_status, verification_photo_url, verification_code, verification_token, verification_token_expires_at, verification_challenge, verification_capture_method, rating, review_text, pros, cons, would_buy_again"
+        "id, ownership_months, verification_status, verification_photo_url, admin_notes, verification_code, verification_token, verification_token_expires_at, verification_challenge, verification_capture_method, rating, review_text, pros, cons, would_buy_again"
       )
       .single();
 
@@ -381,6 +416,12 @@ export function ClaimProductModal({
     setExistingClaim(updatedClaim as ExistingClaim);
     setCapturedPhoto(null);
     setLoading(false);
+    if (previousStatus === "verification_rejected") {
+      setOpen(false);
+      window.location.reload();
+      return;
+    }
+
     setMessage("Photo proof submitted. Admin review can upgrade it to Photo verified.");
     setStep("rating");
   }
@@ -419,7 +460,7 @@ export function ClaimProductModal({
       })
       .eq("id", existingClaim.id)
       .select(
-        "id, ownership_months, verification_status, verification_photo_url, verification_code, verification_token, verification_token_expires_at, verification_challenge, verification_capture_method, rating, review_text, pros, cons, would_buy_again"
+        "id, ownership_months, verification_status, verification_photo_url, admin_notes, verification_code, verification_token, verification_token_expires_at, verification_challenge, verification_capture_method, rating, review_text, pros, cons, would_buy_again"
       )
       .single();
 
@@ -749,7 +790,9 @@ export function ClaimProductModal({
                     onClick={uploadLiveCameraProof}
                     disabled={loading}
                   >
-                    Submit for review
+                    {existingClaim.verification_status === "verification_rejected"
+                      ? "Re-submit Verification"
+                      : "Submit for review"}
                   </button>
                   <button
                     type="button"
