@@ -8,6 +8,7 @@ import {
   buildProductIdentity,
   findDuplicateProducts,
 } from "@/lib/productNormalization";
+import { resolveTaxonomyForProduct } from "@/lib/productTaxonomy";
 
 type ImportProduct = {
   name: string;
@@ -107,12 +108,17 @@ export async function POST(request: NextRequest) {
         continue;
       }
 
+      const resolvedTax = resolveTaxonomyForProduct({
+        category: category,
+        product_type: null
+      });
+
       const { error } = await supabase.from("products").upsert(
         {
           slug: slugify(`${brand ? `${brand} ` : ""}${name}`),
           name,
           brand: brand || null,
-          category,
+          category: resolvedTax.category,
           image_url: imageUrl,
           product_url: sourceUrl || null,
           source_url: sourceUrl || null,
@@ -122,7 +128,12 @@ export async function POST(request: NextRequest) {
           canonical_slug: identity.canonicalSlug,
           aliases: identity.aliases,
           canonical_title: name,
-          product_type: category,
+          product_type: resolvedTax.product_type || resolvedTax.category,
+          main_category: resolvedTax.main_category,
+          main_category_slug: resolvedTax.main_category_slug,
+          category_slug: resolvedTax.category_slug,
+          product_type_slug: resolvedTax.product_type_slug,
+          taxonomy_path: resolvedTax.taxonomy_path,
           short_summary: generated.ai_summary,
           key_specs: {},
           main_features: [],

@@ -12,6 +12,8 @@ type CreateProductBody = {
   name?: string;
   brand?: string;
   category?: string;
+  main_category?: string;
+  product_type?: string;
   model?: string;
   product_url?: string;
   image_url?: string;
@@ -69,7 +71,7 @@ export async function GET(request: NextRequest) {
     const { data, error } = await supabase
       .from("products")
       .select(
-        "id, slug, name, brand, category, image_url, canonical_title, normalized_title, normalized_brand, normalized_model, aliases, product_verification_status, created_at"
+        "id, slug, name, brand, category, main_category, product_type, image_url, canonical_title, normalized_title, normalized_brand, normalized_model, aliases, product_verification_status, created_at"
       )
       .neq("product_verification_status", "rejected")
       .order("created_at", { ascending: false })
@@ -79,14 +81,16 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
-    const rows = ((data || []) as ProductSearchRow[])
+    const rows = ((data || []) as any[])
       .map((product) => {
         const haystack = normalizeProductText(
           [
             product.name,
             product.canonical_title,
             product.brand,
+            product.main_category,
             product.category,
+            product.product_type,
             product.normalized_title,
             product.normalized_brand,
             product.normalized_model,
@@ -167,6 +171,8 @@ export async function GET(request: NextRequest) {
         name: getProductDisplayName(product),
         brand: product.brand,
         category: product.category,
+        main_category: product.main_category,
+        product_type: product.product_type,
         image_url: product.image_url,
         product_verification_status: product.product_verification_status,
         verified_owner_count: ownerCounts.get(product.id) || 0,
@@ -192,6 +198,8 @@ export async function POST(request: NextRequest) {
     const name = body.name?.trim() || "";
     const brand = body.brand?.trim() || "";
     const category = body.category?.trim() || "";
+    const mainCategory = body.main_category?.trim() || null;
+    const productType = body.product_type?.trim() || null;
     const model = body.model?.trim() || null;
     const productUrl = body.product_url?.trim() || null;
     const imageUrl = body.image_url?.trim() || null;
@@ -303,6 +311,8 @@ export async function POST(request: NextRequest) {
       name,
       brand,
       category,
+      mainCategory,
+      productType,
       model,
       productUrl,
       imageUrl,

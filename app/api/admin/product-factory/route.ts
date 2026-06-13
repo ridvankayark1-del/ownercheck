@@ -4,6 +4,7 @@ import {
   requireDatabaseAdmin,
 } from "@/lib/adminAuth";
 import {
+  applyFactoryProductTypeNormalization,
   buildFactoryProductInsert,
   parseProductFactoryCsv,
   ProductImportRowRecord,
@@ -11,6 +12,7 @@ import {
   summarizeFactoryRows,
 } from "@/lib/productFactory";
 import { buildProductIdentity } from "@/lib/productNormalization";
+import { resolveTaxonomyForProduct, slugifyTaxonomyLabel, getMainCategoryBySlug } from "@/lib/productTaxonomy";
 
 type ProductImportBatch = {
   id: string;
@@ -162,7 +164,30 @@ async function publishRows({
 
   const published = [];
 
-  for (const row of (rows || []) as ProductImportRowRecord[]) {
+  for (const rawRow of (rows || []) as ProductImportRowRecord[]) {
+    let row = applyFactoryProductTypeNormalization(rawRow);
+
+    if (
+      row.product_type !== rawRow.product_type ||
+      JSON.stringify(row.specs) !== JSON.stringify(rawRow.specs) ||
+      JSON.stringify(row.warnings) !== JSON.stringify(rawRow.warnings)
+    ) {
+      const { data: normalizedRow, error: normalizeError } = await supabase
+        .from("product_import_rows")
+        .update({
+          product_type: row.product_type,
+          specs: row.specs,
+          warnings: row.warnings,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", rawRow.id)
+        .select("*")
+        .single();
+
+      if (normalizeError) throw normalizeError;
+      row = normalizedRow as ProductImportRowRecord;
+    }
+
     if (row.status === "published") {
       published.push({ id: row.id, status: "published", message: "Already published." });
       continue;
@@ -435,13 +460,124 @@ export async function PATCH(request: NextRequest) {
     };
 
     if (body.action === "update_row" && body.rowId && body.rowPatch) {
-      const patch = {
+      let patch: any = {
         ...body.rowPatch,
         updated_at: new Date().toISOString(),
       };
+
+      if (
+        patch.main_category !== undefined ||
+        patch.category !== undefined ||
+        patch.product_type !== undefined
+      ) {
+        const { data: currentRow } = await supabase
+          .from("product_import_rows")
+          .select("main_category, category, product_type, name, brand")
+          .eq("id", body.rowId)
+          .single();
+
+        const merged = {
+          main_category: patch.main_category !== undefined ? patch.main_category : (currentRow?.main_category || null),
+          category: patch.category !== undefined ? patch.category : (currentRow?.category || null),
+          product_type: patch.product_type !== undefined ? patch.product_type : (currentRow?.product_type || null),
+        };
+
+        const resolvedTax = resolveTaxonomyForProduct({
+          main_category: merged.main_category,
+          category: merged.category,
+          product_type: merged.product_type
+        });
+
+        const name = currentRow?.name || "";
+        const brand = currentRow?.brand || "";
+        const warnings = [];
+
+        const mainConfig = getMainCategoryBySlug(resolvedTax.main_category_slug);
+        if (!mainConfig) {
+          warnings.push(`Unknown main category: "${resolvedTax.main_category}".`);
+        } else {
+          const catConfig = mainConfig.categories[resolvedTax.category_slug];
+          if (!catConfig) {
+            warnings.push(`Unknown category: "${resolvedTax.category}".`);
+          } else if (resolvedTax.product_type) {
+            const hasPt = catConfig.productTypes.some(
+              (pt) => slugifyTaxonomyLabel(pt.label) === resolvedTax.product_type_slug
+            );
+            if (!hasPt) {
+              warnings.push(`Unknown product type: "${resolvedTax.product_type}".`);
+            }
+          }
+        }
+
+        if (!name) warnings.push("Missing product name.");
+        if (!brand) warnings.push("Missing brand.");
+        if (!resolvedTax.category) warnings.push("Missing category.");
+
+        patch = {
+          ...patch,
+          main_category: resolvedTax.main_category,
+          main_category_slug: resolvedTax.main_category_slug,
+          category: resolvedTax.category,
+          category_slug: resolvedTax.category_slug,
+          product_type: resolvedTax.product_type,
+          product_type_slug: resolvedTax.product_type_slug,
+          taxonomy_path: resolvedTax.taxonomy_path,
+          warnings: Array.from(new Set(warnings))
+        };
+      }
+
       const { data, error: updateError } = await supabase
         .from("product_import_rows")
         .update(patch)
+        .eq("id", body.rowId)
+        .select("*")
+        .single();
+
+      if (updateError) {
+        return NextResponse.json({ error: updateError.message }, { status: 500 });
+      }
+
+      if (data?.batch_id) await refreshBatchSummary(supabase, data.batch_id);
+      return NextResponse.json({ row: data });
+    }
+
+    if (body.action === "approve_specs" && body.rowId) {
+      const { data: row, error: fetchError } = await supabase
+        .from("product_import_rows")
+        .select("specs, status")
+        .eq("id", body.rowId)
+        .single();
+
+      if (fetchError || !row) {
+        return NextResponse.json(
+          { error: fetchError?.message || "Row not found." },
+          { status: 404 }
+        );
+      }
+
+      const specs = row.specs || {};
+      const items = Array.isArray(specs._items) ? specs._items : [];
+      const approvedItems = items.map((item: any) => ({
+        ...item,
+        status: "approved",
+      }));
+      const nextSpecs = {
+        ...specs,
+        _items: approvedItems,
+      };
+
+      let nextStatus = row.status;
+      if (row.status === "needs_review") {
+        nextStatus = "ready_to_publish";
+      }
+
+      const { data, error: updateError } = await supabase
+        .from("product_import_rows")
+        .update({
+          specs: nextSpecs,
+          status: nextStatus,
+          updated_at: new Date().toISOString(),
+        })
         .eq("id", body.rowId)
         .select("*")
         .single();
@@ -474,6 +610,82 @@ export async function PATCH(request: NextRequest) {
       }
 
       return NextResponse.json({ rows: checkedRows });
+    }
+
+    if (body.action === "normalize_product_types") {
+      const rowIds = body.rowIds || [];
+      const query = supabase.from("product_import_rows").select("*");
+      const { data: rows, error: rowsError } =
+        rowIds.length > 0
+          ? await query.in("id", rowIds)
+          : await query.eq("batch_id", body.batchId);
+
+      if (rowsError) {
+        return NextResponse.json({ error: rowsError.message }, { status: 500 });
+      }
+
+      const normalizedRows = [];
+      let corrected = 0;
+      let skipped = 0;
+      let manualReview = 0;
+
+      for (const row of (rows || []) as ProductImportRowRecord[]) {
+        if (row.category !== "Headphones") {
+          skipped++;
+          normalizedRows.push(row);
+          continue;
+        }
+
+        const normalizedRow = applyFactoryProductTypeNormalization(row);
+        const changed =
+          normalizedRow.product_type !== row.product_type ||
+          JSON.stringify(normalizedRow.specs) !== JSON.stringify(row.specs) ||
+          JSON.stringify(normalizedRow.warnings) !== JSON.stringify(row.warnings);
+
+        if (!changed) {
+          skipped++;
+          normalizedRows.push(row);
+          continue;
+        }
+
+        const { data: updatedRow, error: updateError } = await supabase
+          .from("product_import_rows")
+          .update({
+            product_type: normalizedRow.product_type,
+            specs: normalizedRow.specs,
+            warnings: normalizedRow.warnings,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", row.id)
+          .select("*")
+          .single();
+
+        if (updateError) throw updateError;
+
+        corrected++;
+        normalizedRows.push(updatedRow as ProductImportRowRecord);
+      }
+
+      if (normalizedRows.some((row) => row.warnings?.length)) {
+        manualReview = normalizedRows.filter((row) =>
+          (row.warnings || []).some((warning) =>
+            warning.toLowerCase().includes("conflict")
+          )
+        ).length;
+      }
+
+      const batchId = normalizedRows[0]?.batch_id || body.batchId;
+      if (batchId) await refreshBatchSummary(supabase, batchId);
+
+      return NextResponse.json({
+        rows: normalizedRows,
+        summary: {
+          checked: (rows || []).length,
+          corrected,
+          skipped,
+          needsManualReview: manualReview,
+        },
+      });
     }
 
     if (body.action === "mark_not_duplicate" && body.rowId) {
@@ -568,3 +780,35 @@ export async function PATCH(request: NextRequest) {
     );
   }
 }
+
+export async function DELETE(request: NextRequest) {
+  try {
+    const { supabase, error } = await requireAdmin(request);
+
+    if (error) {
+      return NextResponse.json({ error }, { status: 403 });
+    }
+
+    const batchId = request.nextUrl.searchParams.get("batchId");
+    if (!batchId) {
+      return NextResponse.json({ error: "Missing batchId" }, { status: 400 });
+    }
+
+    const { error: deleteError } = await supabase
+      .from("product_import_batches")
+      .delete()
+      .eq("id", batchId);
+
+    if (deleteError) {
+      return NextResponse.json({ error: deleteError.message }, { status: 500 });
+    }
+
+    return NextResponse.json({ success: true });
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Could not delete batch" },
+      { status: 500 }
+    );
+  }
+}
+

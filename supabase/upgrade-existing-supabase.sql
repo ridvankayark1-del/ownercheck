@@ -2085,3 +2085,20 @@ grant execute on function public.submit_owner_phone_verification(uuid, text, tex
 -- Enable Realtime for chat messages
 alter publication supabase_realtime add table public.chat_messages;
 
+-- Add taxonomy columns to public.products
+alter table public.products
+  add column if not exists main_category text,
+  add column if not exists main_category_slug text,
+  add column if not exists category_slug text,
+  add column if not exists product_type_slug text,
+  add column if not exists taxonomy_path jsonb;
+
+-- Add taxonomy columns to public.product_import_rows
+alter table public.product_import_rows
+  add column if not exists main_category text,
+  add column if not exists main_category_slug text,
+  add column if not exists category_slug text,
+  add column if not exists product_type_slug text,
+  add column if not exists taxonomy_path jsonb;
+
+

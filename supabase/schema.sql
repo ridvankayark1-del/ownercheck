@@ -93,6 +93,11 @@ create table if not exists public.products (
   suggested_image_url text,
   enrichment_warnings jsonb not null default '[]'::jsonb,
   enrichment_sources jsonb not null default '[]'::jsonb,
+  main_category text,
+  main_category_slug text,
+  category_slug text,
+  product_type_slug text,
+  taxonomy_path jsonb,
   created_at timestamptz not null default now()
 );
 
@@ -187,6 +192,11 @@ create table if not exists public.product_import_rows (
   linked_product_id uuid references public.products(id) on delete set null,
   created_product_id uuid references public.products(id) on delete set null,
   error_message text,
+  main_category text,
+  main_category_slug text,
+  category_slug text,
+  product_type_slug text,
+  taxonomy_path jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique(batch_id, row_index)

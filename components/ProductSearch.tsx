@@ -10,6 +10,8 @@ type ProductSuggestion = {
   name: string;
   brand: string | null;
   category: string | null;
+  main_category?: string | null;
+  product_type?: string | null;
   image_url: string | null;
   product_verification_status: string | null;
   verified_owner_count: number;
@@ -27,12 +29,9 @@ type ProductSearchProps = {
   onSearch?: (query: string) => void;
 };
 
-function getCatalogLabel(status?: string | null) {
+function getCatalogLabel(status?: string | null): string | null {
   if (status === "catalog_verified") return "Catalog verified";
-  if (status === "community_created" || status === "pending_enrichment") {
-    return "Community-created";
-  }
-  return "Info being verified";
+  return null;
 }
 
 export function ProductSearch({
@@ -103,10 +102,14 @@ export function ProductSearch({
     <div className={`relative ${className}`}>
       <form
         onSubmit={submitSearch}
-        className={`grid gap-2 ${compact ? "grid-cols-[1fr_auto]" : "sm:grid-cols-[1fr_auto]"}`}
+        className={`flex items-center bg-white shadow-lg rounded-full border border-slate-100 transition-all duration-300 focus-within:border-slate-300 focus-within:shadow-xl ${
+          compact ? "p-1" : "p-2"
+        }`}
       >
         <input
-          className={`input ${compact ? "h-10 text-sm" : ""} ${inputClassName}`}
+          className={`flex-grow bg-transparent px-5 py-2 text-slate-800 placeholder-slate-400 outline-none ${
+            compact ? "h-8 text-sm" : "h-12 text-base"
+          } ${inputClassName}`}
           value={query}
           onChange={(event) => setQuery(event.target.value)}
           onFocus={() => setFocused(true)}
@@ -117,7 +120,9 @@ export function ProductSearch({
         />
         <button
           type="submit"
-          className={`btn btn-dark ${compact ? "h-10 px-3 text-sm" : ""}`}
+          className={`btn btn-dark rounded-full shrink-0 flex items-center justify-center font-bold transition-all duration-300 ${
+            compact ? "h-8 px-4 text-xs" : "h-12 px-8 text-sm"
+          }`}
         >
           {buttonLabel}
         </button>
@@ -148,8 +153,14 @@ export function ProductSearch({
                   <div className="min-w-0">
                     <p className="truncate text-sm font-black">{product.name}</p>
                     <p className="truncate text-xs font-bold text-muted">
-                      {product.brand || "Unknown brand"}
-                      {product.category ? ` / ${product.category}` : ""}
+                      {[
+                        product.brand,
+                        product.main_category,
+                        product.category,
+                        product.product_type,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
                     </p>
                     <div className="mt-1 flex flex-wrap gap-1">
                       <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-black text-slate-700">
@@ -158,9 +169,11 @@ export function ProductSearch({
                       <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-black text-slate-700">
                         {product.public_answer_count} answers
                       </span>
-                      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-black text-slate-700">
-                        {getCatalogLabel(product.product_verification_status)}
-                      </span>
+                      {getCatalogLabel(product.product_verification_status) && (
+                        <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-black text-emerald-800">
+                          {getCatalogLabel(product.product_verification_status)}
+                        </span>
+                      )}
                     </div>
                   </div>
                 </Link>

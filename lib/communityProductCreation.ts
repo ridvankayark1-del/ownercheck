@@ -2,10 +2,14 @@ import { SupabaseClient } from "@supabase/supabase-js";
 import { enrichProductRecord } from "@/lib/productEnrichment";
 import { buildProductIdentity } from "@/lib/productNormalization";
 
+import { resolveTaxonomyForProduct } from "@/lib/productTaxonomy";
+
 export type CommunityProductInput = {
   name: string;
   brand: string;
   category: string;
+  mainCategory?: string | null;
+  productType?: string | null;
   model?: string | null;
   productUrl?: string | null;
   imageUrl?: string | null;
@@ -73,13 +77,26 @@ export async function createCommunityProduct(
   const productUrl = input.productUrl || null;
   const imageUrl = input.imageUrl || null;
 
+  // Resolve taxonomy fields based on input category and product type
+  const taxonomy = resolveTaxonomyForProduct({
+    main_category: input.mainCategory || null,
+    category: input.category,
+    product_type: input.productType || null,
+  });
+
   const { data: product, error: insertError } = await supabase
     .from("products")
     .insert({
       slug,
       name: input.name,
       brand: input.brand,
-      category: input.category,
+      category: taxonomy.category,
+      product_type: taxonomy.product_type,
+      main_category: taxonomy.main_category,
+      main_category_slug: taxonomy.main_category_slug,
+      category_slug: taxonomy.category_slug,
+      product_type_slug: taxonomy.product_type_slug,
+      taxonomy_path: taxonomy.taxonomy_path,
       model: input.model || null,
       product_url: productUrl,
       source_url: productUrl,
@@ -91,7 +108,6 @@ export async function createCommunityProduct(
       canonical_slug: identity.canonicalSlug,
       aliases: identity.aliases,
       canonical_title: input.name,
-      product_type: input.category,
       short_summary: initialCopy.ai_summary,
       key_specs: {},
       main_features: [],
@@ -124,8 +140,8 @@ export async function createCommunityProduct(
       ...initialCopy,
       specs: {
         brand: input.brand,
-        category: input.category,
-        product_type: input.category,
+        category: taxonomy.category,
+        product_type: taxonomy.product_type,
         model: input.model || null,
         main_features: [],
         best_for: ["Real-owner buying advice"],

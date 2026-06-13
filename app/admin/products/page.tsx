@@ -6,11 +6,14 @@ import { ProductImage } from "@/components/ProductImage";
 import { checkCurrentUserIsAdmin } from "@/lib/adminClient";
 import { normalizeCategory } from "@/lib/productCategoryProfiles";
 import { isPlaceholderImage } from "@/lib/productImages";
+import { getGroupedSpecs } from "@/lib/productSpecs";
 import {
   normalizeProductText,
   scoreProductMatch,
 } from "@/lib/productNormalization";
-import { getCategorySpecKeys } from "@/lib/productTaxonomy";
+import { getCategorySpecKeys, PRODUCT_TAXONOMY, slugifyTaxonomyLabel, resolveTaxonomyForProduct } from "@/lib/productTaxonomy";
+import { getIdentityIssues, getSpecsSummary } from "@/lib/productIssues";
+import { getHeadphoneProductTypeNormalization } from "@/lib/productFactory";
 import { supabase } from "@/lib/supabaseClient";
 
 type Product = {
@@ -20,6 +23,12 @@ type Product = {
   model: string | null;
   brand: string | null;
   category: string | null;
+  product_type: string | null;
+  main_category: string | null;
+  main_category_slug: string | null;
+  category_slug: string | null;
+  product_type_slug: string | null;
+  taxonomy_path: Record<string, any> | null;
   specs: Record<string, unknown> & {
     product_type?: string | null;
     _items?: Array<Record<string, unknown>>;
@@ -49,6 +58,7 @@ type Product = {
   image_approved_at: string | null;
   duplicate_reviewed_at: string | null;
   created_at: string;
+  data_source: string | null;
 };
 
 type SpecDraftRow = {
@@ -114,6 +124,28 @@ const QUEUE_VIEWS: Array<{ id: QueueView; label: string }> = [
 
 function formatStatus(value?: string | null) {
   return (value || "not set").replace(/_/g, " ");
+}
+
+/** Returns a human-readable admin label that distinguishes imported products from community-submitted ones. */
+function formatAdminStatus(product: Pick<Product, "product_verification_status" | "data_source">): string {
+  const status = product.product_verification_status;
+  const source = product.data_source;
+  if (status === "catalog_verified") return "Catalog verified";
+  if (status === "rejected") return "Archived";
+  if (status === "duplicate") return "Duplicate";
+  if (status === "needs_review") return "Needs review";
+  const isAdminImport =
+    source === "admin_product_factory_csv" ||
+    source === "admin_import" ||
+    source === "admin_url_import";
+  const isUserCreated = source === "user_created";
+  if (status === "community_created" || status === "pending_enrichment") {
+    if (isAdminImport) return "Imported product";
+    if (isUserCreated) return "Community submitted";
+    return "Pending review";
+  }
+  if (isAdminImport) return "Imported draft";
+  return formatStatus(status);
 }
 
 function chipClass(tone: "good" | "warn" | "bad" | "neutral" = "neutral") {
@@ -377,11 +409,16 @@ function getIssueChips(product: Product, candidates: DuplicateCandidateView[]) {
   if (duplicateRisk !== "Low" && !product.duplicate_reviewed_at) {
     chips.push({ label: "Possible duplicate", tone: "warn" });
   }
-  if (!product.identity_approved_at || (product.category_confidence || 0) < 0.5) {
-    chips.push({ label: "Identity needed", tone: "warn" });
-  }
-  if (!product.specs_approved_at || getSpecRows(product).length === 0) {
-    chips.push({ label: "Specs needed", tone: "warn" });
+
+  const identityIssues = getIdentityIssues(product);
+  identityIssues.forEach((issue) => {
+    chips.push({ label: issue, tone: "warn" });
+  });
+  const specSummary = getSpecsSummary(product, getSpecRows(product));
+  if (specSummary.missingRecommended > 0) {
+    chips.push({ label: "Missing required specs", tone: "warn" });
+  } else if (!product.specs_approved_at) {
+    chips.push({ label: "Specs need review", tone: "warn" });
   }
   if (!product.image_approved_at) {
     chips.push({
@@ -411,11 +448,15 @@ function getSuggestedAction(product: Product, candidates: DuplicateCandidateView
   if (getDuplicateRisk(candidates) !== "Low" && !product.duplicate_reviewed_at) {
     return "Review duplicate candidates";
   }
-  if (!product.identity_approved_at || (product.category_confidence || 0) < 0.5) {
+  if (getIdentityIssues(product).length > 0) {
     return "Approve identity";
   }
-  if (!product.specs_approved_at || getSpecRows(product).length === 0) {
+  const specSummary = getSpecsSummary(product, getSpecRows(product));
+  if (specSummary.missingRecommended > 0) {
     return "Edit missing specs";
+  }
+  if (!product.specs_approved_at) {
+    return "Approve specs";
   }
   if (!product.image_approved_at) return "Review image";
   if (!product.duplicate_reviewed_at) return "Approve duplicate check";
@@ -440,6 +481,8 @@ export default function AdminProductsPage() {
   const [products, setProducts] = useState<Product[]>([]);
   const [message, setMessage] = useState("");
   const [pageLimit, setPageLimit] = useState(150);
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 25;
   const [searchText, setSearchText] = useState("");
   const [queueView, setQueueView] = useState<QueueView>("needs_attention");
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -448,11 +491,12 @@ export default function AdminProductsPage() {
   const [sortOption, setSortOption] = useState("newest");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [activeProductId, setActiveProductId] = useState("");
+  const [isEditingSpecs, setIsEditingSpecs] = useState(false);
   const [activeTab, setActiveTab] = useState<ReviewTab>("overview");
   const [working, setWorking] = useState(false);
   const [enrichingProductId, setEnrichingProductId] = useState("");
   const [manualDrafts, setManualDrafts] = useState<
-    Record<string, { name: string; brand: string; model: string; category: string; productType: string }>
+    Record<string, { name: string; brand: string; model: string; mainCategory: string; category: string; productType: string }>
   >({});
   const [specDrafts, setSpecDrafts] = useState<Record<string, SpecDraftRow[]>>({});
   const [imageDrafts, setImageDrafts] = useState<Record<string, string>>({});
@@ -462,6 +506,14 @@ export default function AdminProductsPage() {
     useState<Product | null>(null);
   const [mergeCanonicalId, setMergeCanonicalId] = useState("");
   const [mergeSearch, setMergeSearch] = useState("");
+
+  const [productToDelete, setProductToDelete] = useState<Product | null>(null);
+  const [deleteConfirmationName, setDeleteConfirmationName] = useState("");
+  const [deleteValidation, setDeleteValidation] = useState<{
+    loading: boolean;
+    hasLinked: boolean;
+    reasons: string[];
+  }>({ loading: false, hasLinked: false, reasons: [] });
 
   async function getAdminSessionToken() {
     const {
@@ -510,7 +562,7 @@ export default function AdminProductsPage() {
     const { data, error } = await supabase
       .from("products")
       .select(
-        "id, slug, name, model, brand, category, specs, image_url, product_verification_status, canonical_id, source_url, product_url, verified_source, external_summary, enrichment_status, suggested_title, suggested_brand, suggested_model, suggested_category, suggested_product_type, suggested_short_summary, suggested_specs, suggested_image_url, enrichment_warnings, enrichment_sources, category_confidence, specs_confidence, identity_approved_at, specs_approved_at, image_approved_at, duplicate_reviewed_at, created_at"
+        "id, slug, name, model, brand, category, product_type, main_category, main_category_slug, category_slug, product_type_slug, taxonomy_path, specs, image_url, product_verification_status, canonical_id, source_url, product_url, verified_source, external_summary, enrichment_status, suggested_title, suggested_brand, suggested_model, suggested_category, suggested_product_type, suggested_short_summary, suggested_specs, suggested_image_url, enrichment_warnings, enrichment_sources, category_confidence, specs_confidence, identity_approved_at, specs_approved_at, image_approved_at, duplicate_reviewed_at, created_at, data_source"
       )
       .order("created_at", { ascending: false })
       .range(0, pageLimit - 1);
@@ -532,8 +584,9 @@ export default function AdminProductsPage() {
             name: product.name || "",
             brand: product.brand || "",
             model: product.model || "",
+            mainCategory: product.main_category || "",
             category: product.category || "",
-            productType: product.specs?.product_type || "",
+            productType: product.product_type || product.specs?.product_type || "",
           },
         ])
       )
@@ -663,6 +716,16 @@ export default function AdminProductsPage() {
     });
   }, [categoryFilter, productMeta, products, queueView, searchText, sortOption, statusFilter]);
 
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [categoryFilter, queueView, searchText, sortOption, statusFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredProducts.length / itemsPerPage));
+  const paginatedProducts = filteredProducts.slice(
+    (currentPage - 1) * itemsPerPage,
+    currentPage * itemsPerPage
+  );
+
   const activeProduct = products.find((product) => product.id === activeProductId) || null;
   const activeMeta = activeProduct ? productMeta.get(activeProduct.id) : null;
   const mergeCanonicalOptions = useMemo(() => {
@@ -703,12 +766,20 @@ export default function AdminProductsPage() {
     try {
       await getAdminSessionToken();
       const draft = manualDrafts[product.id];
-      const category = normalizeCategory(draft?.category || product.category || "Other");
-      const productType = draft?.productType?.trim() || null;
+      const category = draft?.category || product.category || "Other";
+      const productType = draft?.productType || product.product_type || product.specs?.product_type || null;
+      const mainCategory = draft?.mainCategory || product.main_category || null;
+
+      const resolvedTax = resolveTaxonomyForProduct({
+        main_category: mainCategory,
+        category: category,
+        product_type: productType
+      });
+
       const specs = {
         ...(product.specs || {}),
-        category,
-        product_type: productType,
+        category: resolvedTax.category,
+        product_type: resolvedTax.product_type,
       };
       const { error } = await supabase
         .from("products")
@@ -716,8 +787,13 @@ export default function AdminProductsPage() {
           name: draft?.name?.trim() || product.name,
           brand: draft?.brand?.trim() || null,
           model: draft?.model?.trim() || null,
-          category,
-          product_type: productType,
+          category: resolvedTax.category,
+          product_type: resolvedTax.product_type,
+          main_category: resolvedTax.main_category,
+          main_category_slug: resolvedTax.main_category_slug,
+          category_slug: resolvedTax.category_slug,
+          product_type_slug: resolvedTax.product_type_slug,
+          taxonomy_path: resolvedTax.taxonomy_path,
           specs,
         })
         .eq("id", product.id);
@@ -738,10 +814,12 @@ export default function AdminProductsPage() {
         name: product.suggested_title || current[product.id]?.name || product.name,
         brand: product.suggested_brand || current[product.id]?.brand || product.brand || "",
         model: product.suggested_model || current[product.id]?.model || product.model || "",
+        mainCategory: product.main_category || current[product.id]?.mainCategory || "",
         category: product.suggested_category || current[product.id]?.category || product.category || "",
         productType:
           product.suggested_product_type ||
           current[product.id]?.productType ||
+          product.product_type ||
           product.specs?.product_type ||
           "",
       },
@@ -893,6 +971,154 @@ export default function AdminProductsPage() {
       setMessage("Product status updated.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not update product.");
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function checkLinkedRecords(productId: string): Promise<{
+    hasLinked: boolean;
+    reasons: string[];
+  }> {
+    const reasons: string[] = [];
+
+    // 1. owned_products
+    const { count: ownedCount, error: ownedErr } = await supabase
+      .from("owned_products")
+      .select("id", { count: "exact", head: true })
+      .eq("product_id", productId);
+    if (!ownedErr && ownedCount && ownedCount > 0) {
+      reasons.push(`${ownedCount} owner claim(s) / owned product record(s)`);
+    }
+
+    // 2. questions & answers
+    const { data: questions, error: qErr } = await supabase
+      .from("questions")
+      .select("id")
+      .eq("product_id", productId);
+    if (!qErr && questions && questions.length > 0) {
+      reasons.push(`${questions.length} public question(s)`);
+      
+      const qIds = questions.map((q) => q.id);
+      const { count: answersCount, error: aErr } = await supabase
+        .from("answers")
+        .select("id", { count: "exact", head: true })
+        .in("question_id", qIds);
+      if (!aErr && answersCount && answersCount > 0) {
+        reasons.push(`${answersCount} answer(s)`);
+      }
+    }
+
+    // 4. direct_questions
+    const { count: dqCount, error: dqErr } = await supabase
+      .from("direct_questions")
+      .select("id", { count: "exact", head: true })
+      .eq("product_id", productId);
+    if (!dqErr && dqCount && dqCount > 0) {
+      reasons.push(`${dqCount} direct question(s)`);
+    }
+
+    // 5. chats & chat messages
+    const { data: chats, error: chatErr } = await supabase
+      .from("chats")
+      .select("id")
+      .eq("product_id", productId);
+    if (!chatErr && chats && chats.length > 0) {
+      reasons.push(`${chats.length} chat(s)`);
+      
+      const chatIds = chats.map((c) => c.id);
+      const { count: msgCount, error: msgErr } = await supabase
+        .from("chat_messages")
+        .select("id", { count: "exact", head: true })
+        .in("chat_id", chatIds);
+      if (!msgErr && msgCount && msgCount > 0) {
+        reasons.push(`${msgCount} chat message(s)`);
+      }
+    }
+
+    // 7. owner_product_ratings
+    const { count: ratingCount, error: ratingErr } = await supabase
+      .from("owner_product_ratings")
+      .select("id", { count: "exact", head: true })
+      .eq("product_id", productId);
+    if (!ratingErr && ratingCount && ratingCount > 0) {
+      reasons.push(`${ratingCount} owner rating(s)/scorecard(s)`);
+    }
+
+    // 8. reports
+    const { count: reportCount, error: reportErr } = await supabase
+      .from("reports")
+      .select("id", { count: "exact", head: true })
+      .eq("target_type", "product")
+      .eq("target_id", productId);
+    if (!reportErr && reportCount && reportCount > 0) {
+      reasons.push(`${reportCount} report(s)`);
+    }
+
+    // 9. product_import_rows
+    const { data: importRows, error: importErr } = await supabase
+      .from("product_import_rows")
+      .select("id")
+      .or(`linked_product_id.eq.${productId},created_product_id.eq.${productId}`);
+    if (!importErr && importRows && importRows.length > 0) {
+      reasons.push(`${importRows.length} import row(s)`);
+    }
+
+    // 10. product_submissions
+    const { count: subCount, error: subErr } = await supabase
+      .from("product_submissions")
+      .select("id", { count: "exact", head: true })
+      .eq("linked_product_id", productId);
+    if (!subErr && subCount && subCount > 0) {
+      reasons.push(`${subCount} product submission(s)`);
+    }
+
+    return {
+      hasLinked: reasons.length > 0,
+      reasons,
+    };
+  }
+
+  async function startProductDelete(product: Product) {
+    setProductToDelete(product);
+    setDeleteConfirmationName("");
+    setDeleteValidation({ loading: true, hasLinked: false, reasons: [] });
+
+    try {
+      const { hasLinked, reasons } = await checkLinkedRecords(product.id);
+      setDeleteValidation({ loading: false, hasLinked, reasons });
+    } catch (error) {
+      console.error(error);
+      setDeleteValidation({ loading: false, hasLinked: true, reasons: ["Error checking database records"] });
+    }
+  }
+
+  async function confirmProductDelete() {
+    if (!productToDelete) return;
+    if (deleteConfirmationName !== productToDelete.name) {
+      setMessage("Product name confirmation does not match.");
+      return;
+    }
+
+    setWorking(true);
+    setMessage("");
+
+    try {
+      await getAdminSessionToken();
+      
+      const { error } = await supabase
+        .from("products")
+        .delete()
+        .eq("id", productToDelete.id);
+
+      if (error) throw error;
+
+      setProductToDelete(null);
+      setActiveProductId("");
+      await loadProducts({ clearMessage: false });
+      setMessage(`Product "${productToDelete.name}" permanently deleted.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not delete product.");
     } finally {
       setWorking(false);
     }
@@ -1176,7 +1402,7 @@ export default function AdminProductsPage() {
             >
               <option value="all">All statuses</option>
               <option value="catalog_verified">Catalog verified</option>
-              <option value="community_created">Community-created</option>
+              <option value="community_created">Imported / Community submitted</option>
               <option value="pending_enrichment">Pending enrichment</option>
               <option value="needs_review">Needs review</option>
               <option value="duplicate">Duplicate</option>
@@ -1205,9 +1431,30 @@ export default function AdminProductsPage() {
       </section>
 
       <section className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1fr)_420px]">
-        <div className="card overflow-hidden">
-          <div className="border-b bg-slate-50 px-4 py-3 text-sm font-bold text-muted">
-            Showing {filteredProducts.length} of {products.length} loaded products
+        <div className="card overflow-hidden p-0">
+          <div className="border-b bg-slate-50 px-4 py-3 text-sm font-bold text-muted flex flex-wrap items-center justify-between gap-3">
+            <p>Showing {filteredProducts.length} of {products.length} loaded products</p>
+            {totalPages > 1 && (
+              <div className="flex items-center gap-3">
+                <button 
+                  type="button" 
+                  disabled={currentPage === 1}
+                  onClick={() => setCurrentPage(p => p - 1)}
+                  className="hover:underline disabled:opacity-50 disabled:no-underline"
+                >
+                  Prev
+                </button>
+                <span>Page {currentPage} of {totalPages}</span>
+                <button 
+                  type="button" 
+                  disabled={currentPage === totalPages}
+                  onClick={() => setCurrentPage(p => p + 1)}
+                  className="hover:underline disabled:opacity-50 disabled:no-underline"
+                >
+                  Next
+                </button>
+              </div>
+            )}
           </div>
 
           {filteredProducts.length === 0 ? (
@@ -1217,7 +1464,7 @@ export default function AdminProductsPage() {
             </div>
           ) : (
             <div className="divide-y">
-              {filteredProducts.map((product) => {
+              {paginatedProducts.map((product) => {
                 const meta = productMeta.get(product.id);
                 const duplicateRisk = meta?.duplicateRisk || "Low";
                 const specRows = meta?.specRows || [];
@@ -1231,108 +1478,143 @@ export default function AdminProductsPage() {
                 return (
                   <article
                     key={product.id}
-                    className={`grid gap-3 p-4 md:grid-cols-[32px_64px_minmax(220px,1fr)_180px_160px_180px] md:items-center ${
-                      active ? "bg-slate-50" : ""
-                    }`}
+                    className={`flex flex-col gap-3 p-4 ${active ? "bg-slate-50" : ""}`}
                   >
-                    <input
-                      type="checkbox"
-                      checked={selectedIds.includes(product.id)}
-                      onChange={(event) =>
-                        setSelectedIds((current) =>
-                          event.target.checked
-                            ? [...current, product.id]
-                            : current.filter((id) => id !== product.id)
-                        )
-                      }
-                    />
-                    <div className="h-16 w-16 overflow-hidden rounded-xl bg-slate-100">
-                      <ProductImage
-                        src={product.image_url}
-                        category={product.category}
-                        alt={product.name}
-                        className="h-full w-full object-cover"
+                    {/* Row 1: Thumbnail + Name/Status/Chips */}
+                    <div className="flex items-start gap-3 min-w-0">
+                      <input
+                        type="checkbox"
+                        className="mt-1 shrink-0"
+                        checked={selectedIds.includes(product.id)}
+                        onChange={(event) =>
+                          setSelectedIds((current) =>
+                            event.target.checked
+                              ? [...current, product.id]
+                              : current.filter((id) => id !== product.id)
+                          )
+                        }
                       />
+                      <div className="shrink-0 h-14 w-14 overflow-hidden rounded-xl bg-slate-100">
+                        <ProductImage
+                          src={product.image_url}
+                          category={product.category}
+                          alt={product.name}
+                          className="h-full w-full object-cover"
+                        />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h2 className="font-black text-sm leading-snug">{product.name}</h2>
+                          <span className={`rounded-full px-2 py-0.5 text-xs font-black shrink-0 ${chipClass(product.product_verification_status === "catalog_verified" ? "good" : product.product_verification_status === "rejected" ? "bad" : "neutral")}`}>
+                            {formatAdminStatus(product)}
+                          </span>
+                        </div>
+                        <p className="mt-0.5 text-xs font-bold text-muted leading-snug">
+                          {product.brand || "Unknown brand"}
+                        </p>
+                        <p className="text-[10px] font-medium text-slate-500 leading-snug mt-0.5">
+                          {[
+                            product.main_category,
+                            product.category,
+                            product.product_type || product.specs?.product_type
+                          ].filter(Boolean).join(" · ")}
+                        </p>
+                        <div className="mt-1.5 flex flex-wrap gap-1">
+                          {(meta?.issueChips || []).map((chip) => (
+                            <span key={chip.label} className={`rounded-full px-2 py-0.5 text-[10px] font-black ${chipClass(chip.tone)}`}>
+                              {chip.label}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
                     </div>
-                    <div className="min-w-0">
+
+                    {/* Row 2: Stats + Action Buttons */}
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between pl-12 sm:pl-[calc(1rem+3.5rem+0.75rem)]">
                       <div className="flex flex-wrap items-center gap-2">
-                        <h2 className="truncate text-lg font-black">{product.name}</h2>
-                        <span className={`rounded-full px-2 py-0.5 text-xs font-black ${chipClass(product.product_verification_status === "catalog_verified" ? "good" : product.product_verification_status === "rejected" ? "bad" : "neutral")}`}>
-                          {formatStatus(product.product_verification_status)}
+                        <span className="text-xs font-bold text-muted whitespace-nowrap rounded-lg bg-slate-100 px-2 py-1">
+                          Dupe: <strong className="text-foreground">{duplicateRisk}</strong>
+                        </span>
+                        <span className="text-xs font-bold text-muted whitespace-nowrap rounded-lg bg-slate-100 px-2 py-1">
+                          Specs <strong className="text-foreground">{specRows.filter((row) => row.value.trim()).length}/{recommendedCount || 1}</strong>
+                        </span>
+                        <span className="text-xs font-bold text-muted whitespace-nowrap rounded-lg bg-slate-100 px-2 py-1">
+                          {getImageStatusLabel(product)}
                         </span>
                       </div>
-                      <p className="mt-1 text-sm font-bold text-muted">
-                        {product.brand || "Unknown brand"} / {product.category || "Uncategorized"}
-                        {product.specs?.product_type ? ` / ${product.specs.product_type}` : ""}
-                      </p>
-                      <div className="mt-2 flex flex-wrap gap-1">
-                        {(meta?.issueChips || []).map((chip) => (
-                          <span key={chip.label} className={`rounded-full px-2 py-0.5 text-xs font-black ${chipClass(chip.tone)}`}>
-                            {chip.label}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                    <div>
-                      <p className="text-sm font-black">Duplicate: {duplicateRisk}</p>
-                      {meta?.duplicateCandidates[0] && (
-                        <p className="mt-1 truncate text-xs font-bold text-muted">
-                          {meta.duplicateCandidates[0].product.name} / {Math.round(meta.duplicateCandidates[0].score * 100)}%
-                        </p>
-                      )}
-                    </div>
-                    <div>
-                      <p className="text-sm font-black">
-                        Specs {specRows.filter((row) => row.value.trim()).length}/{recommendedCount || 1}
-                      </p>
-                      <p className="mt-1 text-xs font-bold text-muted">
-                        {getImageStatusLabel(product)}
-                      </p>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        type="button"
-                        className="btn btn-dark"
-                        onClick={() => {
-                          setActiveProductId(product.id);
-                          setActiveTab("overview");
-                        }}
-                      >
-                        Review
-                      </button>
-                      <button
-                        type="button"
-                        className="btn"
-                        onClick={() => {
-                          setActiveProductId(product.id);
-                          setActiveTab(
-                            meta?.suggestedAction.includes("duplicate")
-                              ? "duplicate"
-                              : meta?.suggestedAction.includes("spec")
-                                ? "specs"
-                                : meta?.suggestedAction.includes("image")
-                                  ? "image"
-                                  : meta?.suggestedAction.includes("identity")
-                                    ? "identity"
-                                    : "status"
-                          );
-                        }}
-                      >
-                        {meta?.suggestedAction || "Review"}
-                      </button>
-                      {product.product_verification_status !== "duplicate" && (
+                      <div className="flex items-center gap-2 sm:ml-auto shrink-0">
+                        <button
+                          type="button"
+                          className="btn btn-dark"
+                          style={{ minHeight: "34px", padding: "6px 14px", fontSize: "0.8rem" }}
+                          onClick={() => {
+                            setActiveProductId(product.id);
+                            setActiveTab("overview");
+                          }}
+                        >
+                          Review
+                        </button>
                         <button
                           type="button"
                           className="btn"
-                          onClick={() => openMergeDialog(product)}
+                          style={{ minHeight: "34px", padding: "6px 14px", fontSize: "0.8rem" }}
+                          onClick={() => {
+                            setActiveProductId(product.id);
+                            setActiveTab(
+                              meta?.suggestedAction.includes("duplicate")
+                                ? "duplicate"
+                                : meta?.suggestedAction.includes("spec")
+                                  ? "specs"
+                                  : meta?.suggestedAction.includes("image")
+                                    ? "image"
+                                    : meta?.suggestedAction.includes("identity")
+                                      ? "identity"
+                                      : "status"
+                            );
+                          }}
                         >
-                          Merge
+                          {meta?.suggestedAction || "Review"}
                         </button>
-                      )}
+                        {product.product_verification_status !== "duplicate" && (
+                          <button
+                            type="button"
+                            className="btn"
+                            style={{ minHeight: "34px", padding: "6px 14px", fontSize: "0.8rem" }}
+                            onClick={() => openMergeDialog(product)}
+                          >
+                            Merge
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </article>
                 );
               })}
+              {totalPages > 1 && (
+                <div className="border-t bg-slate-50 p-4 flex flex-wrap items-center justify-between gap-4">
+                  <p className="text-sm font-bold text-muted">
+                    Page {currentPage} of {totalPages}
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <button 
+                      type="button" 
+                      className="btn px-4"
+                      disabled={currentPage === 1}
+                      onClick={() => setCurrentPage(p => p - 1)}
+                    >
+                      Previous
+                    </button>
+                    <button 
+                      type="button" 
+                      className="btn px-4"
+                      disabled={currentPage === totalPages}
+                      onClick={() => setCurrentPage(p => p + 1)}
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1346,7 +1628,7 @@ export default function AdminProductsPage() {
               </p>
             </section>
           ) : (
-            <section className="card max-h-[calc(100vh-7rem)] overflow-y-auto p-5">
+            <section key={activeProduct.id} className="card max-h-[calc(100vh-7rem)] overflow-y-auto p-5">
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <p className="text-sm font-bold text-muted">Product review</p>
@@ -1428,68 +1710,278 @@ export default function AdminProductsPage() {
                 </div>
               )}
 
-              {activeTab === "identity" && (
-                <div className="mt-4 space-y-4">
-                  {(activeProduct.suggested_title ||
-                    activeProduct.suggested_brand ||
-                    activeProduct.suggested_category ||
-                    activeProduct.suggested_product_type) && (
-                    <div className="rounded-2xl bg-amber-50 p-4 text-sm font-bold text-amber-900">
-                      Suggested: {[activeProduct.suggested_brand, activeProduct.suggested_title].filter(Boolean).join(" ")}
-                      <br />
-                      {[activeProduct.suggested_category, activeProduct.suggested_product_type].filter(Boolean).join(" / ")}
-                      <button type="button" className="mt-3 block underline" onClick={() => applySuggestedIdentity(activeProduct)}>
-                        Apply suggested identity to editor
+              {activeTab === "identity" && (() => {
+                const specRows = specDrafts[activeProduct.id] ? specDrafts[activeProduct.id] : getSpecRows(activeProduct);
+                const activeTypeNormalization = getHeadphoneProductTypeNormalization({
+                  name: manualDrafts[activeProduct.id]?.name || activeProduct.name,
+                  category: manualDrafts[activeProduct.id]?.category || activeProduct.category,
+                  productType: manualDrafts[activeProduct.id]?.productType || activeProduct.specs?.product_type,
+                  specs: rowsToSpecs(activeProduct, specRows),
+                });
+
+                const activeDraft = manualDrafts[activeProduct.id] || {
+                  name: activeProduct.name || "",
+                  brand: activeProduct.brand || "",
+                  model: activeProduct.model || "",
+                  mainCategory: activeProduct.main_category || "",
+                  category: activeProduct.category || "",
+                  productType: activeProduct.product_type || activeProduct.specs?.product_type || "",
+                };
+
+                const selectedMainCategorySlug = activeDraft.mainCategory ? slugifyTaxonomyLabel(activeDraft.mainCategory) : "";
+                const selectedCategorySlug = activeDraft.category ? slugifyTaxonomyLabel(activeDraft.category) : "";
+                const selectedProductTypeSlug = activeDraft.productType ? slugifyTaxonomyLabel(activeDraft.productType) : "";
+
+                const mainCategoriesList = Object.values(PRODUCT_TAXONOMY);
+                const categoriesList = selectedMainCategorySlug ? Object.values(PRODUCT_TAXONOMY[selectedMainCategorySlug]?.categories || {}) : [];
+                const productTypesList = (selectedMainCategorySlug && selectedCategorySlug) ? PRODUCT_TAXONOMY[selectedMainCategorySlug]?.categories[selectedCategorySlug]?.productTypes || [] : [];
+
+                const updateDraftField = (key: string, value: string) => {
+                  setManualDrafts((current) => {
+                    const currentDraft = current[activeProduct.id] || {
+                      name: activeProduct.name || "",
+                      brand: activeProduct.brand || "",
+                      model: activeProduct.model || "",
+                      mainCategory: activeProduct.main_category || "",
+                      category: activeProduct.category || "",
+                      productType: activeProduct.product_type || activeProduct.specs?.product_type || "",
+                    };
+                    return {
+                      ...current,
+                      [activeProduct.id]: {
+                        ...currentDraft,
+                        [key]: value,
+                      },
+                    };
+                  });
+                };
+
+                return (
+                  <div className="mt-4 space-y-4">
+                    {(activeProduct.suggested_title ||
+                      activeProduct.suggested_brand ||
+                      activeProduct.suggested_category ||
+                      activeProduct.suggested_product_type) && (
+                      <div className="rounded-2xl bg-amber-50 p-4 text-sm font-bold text-amber-900">
+                        Suggested: {[activeProduct.suggested_brand, activeProduct.suggested_title].filter(Boolean).join(" ")}
+                        <br />
+                        {[activeProduct.suggested_category, activeProduct.suggested_product_type].filter(Boolean).join(" / ")}
+                        <button type="button" className="mt-3 block underline" onClick={() => applySuggestedIdentity(activeProduct)}>
+                          Apply suggested identity to editor
+                        </button>
+                      </div>
+                    )}
+                        {/* Name Input */}
+                        <div>
+                          <label className="label">Product title</label>
+                          <input
+                            className="input mt-2"
+                            value={activeDraft.name}
+                            onChange={(e) => updateDraftField("name", e.target.value)}
+                          />
+                        </div>
+
+                        {/* Brand Input */}
+                        <div>
+                          <label className="label">Brand</label>
+                          <input
+                            className="input mt-2"
+                            value={activeDraft.brand}
+                            onChange={(e) => updateDraftField("brand", e.target.value)}
+                          />
+                        </div>
+
+                        {/* Model Input */}
+                        <div>
+                          <label className="label">Model / variant</label>
+                          <input
+                            className="input mt-2"
+                            value={activeDraft.model || ""}
+                            onChange={(e) => updateDraftField("model", e.target.value)}
+                          />
+                        </div>
+
+                        {/* Main Category Dropdown */}
+                        <div>
+                          <label className="label">Main Category</label>
+                          <select
+                            className="input mt-2 bg-white select"
+                            value={selectedMainCategorySlug}
+                            onChange={(e) => {
+                              const newMainSlug = e.target.value;
+                              const newMainLabel = PRODUCT_TAXONOMY[newMainSlug]?.label || "";
+                              
+                              const oldCatSlug = selectedCategorySlug;
+                              const isCatValid = newMainSlug && PRODUCT_TAXONOMY[newMainSlug]?.categories[oldCatSlug];
+                              const finalCatSlug = isCatValid ? oldCatSlug : "";
+                              const finalCatLabel = isCatValid ? (PRODUCT_TAXONOMY[newMainSlug]?.categories[oldCatSlug]?.label || "") : "";
+                              
+                              const oldPtSlug = selectedProductTypeSlug;
+                              const isPtValid = isCatValid && PRODUCT_TAXONOMY[newMainSlug]?.categories[oldCatSlug]?.productTypes.some(pt => pt.slug === oldPtSlug);
+                              const finalPtSlug = isPtValid ? oldPtSlug : "";
+                              const finalPtLabel = isPtValid ? (PRODUCT_TAXONOMY[newMainSlug]?.categories[oldCatSlug]?.productTypes.find(pt => pt.slug === oldPtSlug)?.label || "") : "";
+
+                              setManualDrafts((current) => {
+                                const currentDraft = current[activeProduct.id] || {
+                                  name: activeProduct.name || "",
+                                  brand: activeProduct.brand || "",
+                                  model: activeProduct.model || "",
+                                  mainCategory: activeProduct.main_category || "",
+                                  category: activeProduct.category || "",
+                                  productType: activeProduct.product_type || activeProduct.specs?.product_type || "",
+                                };
+                                return {
+                                  ...current,
+                                  [activeProduct.id]: {
+                                    ...currentDraft,
+                                    mainCategory: newMainLabel,
+                                    category: finalCatLabel,
+                                    productType: finalPtLabel || "",
+                                  },
+                                };
+                              });
+                            }}
+                          >
+                            <option value="">-- Select Main Category --</option>
+                            {mainCategoriesList.map((main) => (
+                              <option key={main.slug} value={main.slug}>
+                                {main.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        {/* Category Dropdown */}
+                        <div>
+                          <label className="label">Category</label>
+                          <select
+                            className="input mt-2 bg-white select"
+                            disabled={!selectedMainCategorySlug}
+                            value={selectedCategorySlug}
+                            onChange={(e) => {
+                              const newCatSlug = e.target.value;
+                              const newCatLabel = selectedMainCategorySlug ? PRODUCT_TAXONOMY[selectedMainCategorySlug]?.categories[newCatSlug]?.label || "" : "";
+                              
+                              setManualDrafts((current) => {
+                                const currentDraft = current[activeProduct.id] || {
+                                  name: activeProduct.name || "",
+                                  brand: activeProduct.brand || "",
+                                  model: activeProduct.model || "",
+                                  mainCategory: activeProduct.main_category || "",
+                                  category: activeProduct.category || "",
+                                  productType: activeProduct.product_type || activeProduct.specs?.product_type || "",
+                                };
+                                return {
+                                  ...current,
+                                  [activeProduct.id]: {
+                                    ...currentDraft,
+                                    category: newCatLabel,
+                                    productType: "",
+                                  },
+                                };
+                              });
+                            }}
+                          >
+                            <option value="">-- Select Category --</option>
+                            {categoriesList.map((cat) => (
+                              <option key={cat.slug} value={cat.slug}>
+                                {cat.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        {/* Product Type Dropdown */}
+                        <div>
+                          <label className="label">Product Type</label>
+                          <select
+                            className="input mt-2 bg-white select"
+                            disabled={!selectedCategorySlug}
+                            value={selectedProductTypeSlug}
+                            onChange={(e) => {
+                              const newPtSlug = e.target.value;
+                              const newPtLabel = productTypesList.find(pt => pt.slug === newPtSlug)?.label || "";
+                              
+                              setManualDrafts((current) => {
+                                const currentDraft = current[activeProduct.id] || {
+                                  name: activeProduct.name || "",
+                                  brand: activeProduct.brand || "",
+                                  model: activeProduct.model || "",
+                                  mainCategory: activeProduct.main_category || "",
+                                  category: activeProduct.category || "",
+                                  productType: activeProduct.product_type || activeProduct.specs?.product_type || "",
+                                };
+                                return {
+                                  ...current,
+                                  [activeProduct.id]: {
+                                    ...currentDraft,
+                                    productType: newPtLabel || "",
+                                  },
+                                };
+                              });
+                            }}
+                          >
+                            <option value="">-- Select Product Type --</option>
+                            {productTypesList.map((pt) => (
+                              <option key={pt.slug} value={pt.slug}>
+                                {pt.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                    {activeTypeNormalization.shouldApply && (
+                      <div className="rounded-2xl bg-amber-50 p-4 text-sm font-bold text-amber-900">
+                        <p className="font-black">
+                          Product type conflicts with specs.
+                        </p>
+                        <p className="mt-2">
+                          Current: {activeTypeNormalization.currentProductType || "-"}
+                        </p>
+                        <p>
+                          Suggested from specs:{" "}
+                          {activeTypeNormalization.derivedProductType}
+                        </p>
+                        <button
+                          type="button"
+                          className="btn mt-3"
+                          onClick={() =>
+                            setManualDrafts((current) => ({
+                              ...current,
+                              [activeProduct.id]: {
+                                ...current[activeProduct.id],
+                                productType: activeTypeNormalization.derivedProductType || "",
+                              },
+                            }))
+                          }
+                        >
+                          Apply suggested type
+                        </button>
+                      </div>
+                    )}
+
+                    {activeProduct.enrichment_warnings?.some((warning) =>
+                      warning.toLowerCase().includes("product type")
+                    ) && (
+                      <p className="rounded-2xl bg-red-50 p-3 text-sm font-bold text-red-700">
+                        Product type may conflict with product identity. Review before approving identity.
+                      </p>
+                    )}
+
+                    <div className="flex flex-wrap gap-3">
+                      <button type="button" className="btn" onClick={() => saveIdentity(activeProduct)} disabled={working}>
+                        Save identity
+                      </button>
+                      <button type="button" className="btn btn-dark" onClick={() => approveProductReview(activeProduct.id, "identity")} disabled={working}>
+                        Approve identity
+                      </button>
+                      <button type="button" className="btn" onClick={() => updateProductStatus(activeProduct, "needs_review")} disabled={working}>
+                        Mark identity needs review
                       </button>
                     </div>
-                  )}
-
-                  {[
-                    ["name", "Product title"],
-                    ["brand", "Brand"],
-                    ["model", "Model / variant"],
-                    ["category", "Category"],
-                    ["productType", "Product type"],
-                  ].map(([key, label]) => (
-                    <div key={key}>
-                      <label className="label">{label}</label>
-                      <input
-                        className="input mt-2"
-                        value={manualDrafts[activeProduct.id]?.[key as keyof (typeof manualDrafts)[string]] || ""}
-                        onChange={(event) =>
-                          setManualDrafts((current) => ({
-                            ...current,
-                            [activeProduct.id]: {
-                              ...current[activeProduct.id],
-                              [key]: event.target.value,
-                            },
-                          }))
-                        }
-                      />
-                    </div>
-                  ))}
-
-                  {activeProduct.enrichment_warnings?.some((warning) =>
-                    warning.toLowerCase().includes("product type")
-                  ) && (
-                    <p className="rounded-2xl bg-red-50 p-3 text-sm font-bold text-red-700">
-                      Product type may conflict with product identity. Review before approving identity.
-                    </p>
-                  )}
-
-                  <div className="flex flex-wrap gap-3">
-                    <button type="button" className="btn" onClick={() => saveIdentity(activeProduct)} disabled={working}>
-                      Save identity
-                    </button>
-                    <button type="button" className="btn btn-dark" onClick={() => approveProductReview(activeProduct.id, "identity")} disabled={working}>
-                      Approve identity
-                    </button>
-                    <button type="button" className="btn" onClick={() => updateProductStatus(activeProduct, "needs_review")} disabled={working}>
-                      Mark identity needs review
-                    </button>
                   </div>
-                </div>
-              )}
+                );
+              })()}
 
               {activeTab === "specs" && (
                 <div className="mt-4 space-y-4">
@@ -1519,166 +2011,225 @@ export default function AdminProductsPage() {
                           </p>
                         </div>
 
+                        <div className="flex items-center justify-between mt-4">
+                          <h3 className="font-black">
+                            Specs
+                          </h3>
+                          <button
+                            type="button"
+                            className="text-xs font-black underline"
+                            onClick={() => setIsEditingSpecs(!isEditingSpecs)}
+                          >
+                            {isEditingSpecs ? "Done editing" : "Edit specs"}
+                          </button>
+                        </div>
                         {rows.filter((row) => row.value.trim()).length === 0 ? (
                           <p className="rounded-2xl bg-slate-50 p-4 text-sm font-bold text-muted">
                             No filled specs yet. Add a spec or use missing recommended specs below.
                           </p>
                         ) : (
-                          <div className="space-y-2">
-                            {rows.map((row, index) => (
+                          <div className="space-y-4">
+                            {getGroupedSpecs(
+                              rows.map((row, index) => ({ ...row, index }))
+                            ).map((group) => (
                               <div
-                                key={`${row.key}-${index}`}
-                                className="rounded-2xl border p-3"
+                                key={group.label}
+                                className="rounded-2xl bg-slate-50 p-3"
                               >
-                                <div className="grid gap-2 sm:grid-cols-[1fr_1.3fr_auto]">
-                                  <input
-                                    className="input"
-                                    value={row.label || row.key}
-                                    placeholder="Label or key"
-                                    onChange={(event) =>
-                                      setSpecDrafts((current) => ({
-                                        ...current,
-                                        [activeProduct.id]: (current[activeProduct.id] || []).map((item, itemIndex) =>
-                                          itemIndex === index
-                                            ? {
-                                                ...item,
-                                                label: event.target.value,
-                                                key: item.key || event.target.value.toLowerCase().replace(/\s+/g, "_"),
+                                <h4 className="font-black text-sm">{group.label}</h4>
+                                <div className="mt-2 space-y-1">
+                                  {group.items.map((row) => (
+                                    <div
+                                      key={`${row.key}-${row.index}`}
+                                      className={
+                                        isEditingSpecs
+                                          ? "mt-3 space-y-2 rounded border border-slate-200 bg-white p-2"
+                                          : "flex items-start justify-between border-b border-slate-200 py-1 last:border-0"
+                                      }
+                                    >
+                                      {isEditingSpecs ? (
+                                        <>
+                                          <div className="grid gap-2 sm:grid-cols-[1fr_1.3fr_auto]">
+                                            <input
+                                              className="input text-xs"
+                                              value={row.label || row.key}
+                                              placeholder="Label or key"
+                                              onChange={(event) =>
+                                                setSpecDrafts((current) => ({
+                                                  ...current,
+                                                  [activeProduct.id]: (
+                                                    current[activeProduct.id] || []
+                                                  ).map((item, itemIndex) =>
+                                                    itemIndex === row.index
+                                                      ? {
+                                                          ...item,
+                                                          label: event.target.value,
+                                                          key:
+                                                            item.key ||
+                                                            event.target.value
+                                                              .toLowerCase()
+                                                              .replace(/\s+/g, "_"),
+                                                        }
+                                                      : item
+                                                  ),
+                                                }))
                                               }
-                                            : item
-                                        ),
-                                      }))
-                                    }
-                                  />
-                                  <input
-                                    className="input"
-                                    value={row.value}
-                                    placeholder="Value"
-                                    onChange={(event) =>
-                                      setSpecDrafts((current) => ({
-                                        ...current,
-                                        [activeProduct.id]: (current[activeProduct.id] || []).map((item, itemIndex) =>
-                                          itemIndex === index ? { ...item, value: event.target.value } : item
-                                        ),
-                                      }))
-                                    }
-                                  />
-                                  <button
-                                    type="button"
-                                    className="btn"
-                                    onClick={() =>
-                                      setSpecDrafts((current) => ({
-                                        ...current,
-                                        [activeProduct.id]: (current[activeProduct.id] || []).filter(
-                                          (_item, itemIndex) => itemIndex !== index
-                                        ),
-                                      }))
-                                    }
-                                  >
-                                    Remove
-                                  </button>
+                                            />
+                                            <input
+                                              className="input text-xs"
+                                              value={row.value}
+                                              placeholder="Value"
+                                              onChange={(event) =>
+                                                setSpecDrafts((current) => ({
+                                                  ...current,
+                                                  [activeProduct.id]: (
+                                                    current[activeProduct.id] || []
+                                                  ).map((item, itemIndex) =>
+                                                    itemIndex === row.index
+                                                      ? {
+                                                          ...item,
+                                                          value: event.target.value,
+                                                        }
+                                                      : item
+                                                  ),
+                                                }))
+                                              }
+                                            />
+                                            <button
+                                              type="button"
+                                              className="btn text-xs"
+                                              onClick={() =>
+                                                setSpecDrafts((current) => ({
+                                                  ...current,
+                                                  [activeProduct.id]: (
+                                                    current[activeProduct.id] || []
+                                                  ).filter(
+                                                    (_item, itemIndex) =>
+                                                      itemIndex !== row.index
+                                                  ),
+                                                }))
+                                              }
+                                            >
+                                              Remove
+                                            </button>
+                                          </div>
+                                        </>
+                                      ) : (
+                                        <>
+                                          <span className="w-1/3 pr-2 text-xs font-bold text-slate-500">
+                                            {row.label || row.key}
+                                          </span>
+                                          <span className="w-2/3 text-xs text-slate-900">
+                                            {row.value}
+                                          </span>
+                                        </>
+                                      )}
+                                    </div>
+                                  ))}
                                 </div>
                               </div>
                             ))}
                           </div>
                         )}
 
-                        <details
-                          className="rounded-2xl bg-slate-50 p-4"
-                          open={sourceSummary.shouldShowAdvanced}
-                        >
-                          <summary className="cursor-pointer font-black">
-                            Advanced spec metadata
-                            {sourceSummary.lowConfidenceCount > 0
-                              ? ` · ${sourceSummary.lowConfidenceCount} low confidence`
-                              : ""}
-                            {sourceSummary.hasMixedSources ? " · mixed sources" : ""}
-                          </summary>
-                          <div className="mt-3 space-y-3">
-                            {rows.map((row, index) => (
-                              <div
-                                key={`${row.key}-metadata-${index}`}
-                                className="rounded-2xl bg-white p-3"
-                              >
-                                <p className="mb-2 text-sm font-black">
-                                  {row.label || row.key || `Spec ${index + 1}`}
-                                </p>
-                                <div className="grid gap-2 sm:grid-cols-2">
-                                  <input
-                                    className="input"
-                                    value={row.key}
-                                    placeholder="key"
-                                    onChange={(event) =>
-                                      setSpecDrafts((current) => ({
-                                        ...current,
-                                        [activeProduct.id]: (current[activeProduct.id] || []).map((item, itemIndex) =>
-                                          itemIndex === index ? { ...item, key: event.target.value } : item
-                                        ),
-                                      }))
-                                    }
-                                  />
-                                  <input
-                                    className="input"
-                                    value={row.source_type}
-                                    placeholder="source type"
-                                    onChange={(event) =>
-                                      setSpecDrafts((current) => ({
-                                        ...current,
-                                        [activeProduct.id]: (current[activeProduct.id] || []).map((item, itemIndex) =>
-                                          itemIndex === index ? { ...item, source_type: event.target.value } : item
-                                        ),
-                                      }))
-                                    }
-                                  />
-                                  <input
-                                    className="input"
-                                    value={row.source_url}
-                                    placeholder="source URL"
-                                    onChange={(event) =>
-                                      setSpecDrafts((current) => ({
-                                        ...current,
-                                        [activeProduct.id]: (current[activeProduct.id] || []).map((item, itemIndex) =>
-                                          itemIndex === index ? { ...item, source_url: event.target.value } : item
-                                        ),
-                                      }))
-                                    }
-                                  />
-                                  <input
-                                    className="input"
-                                    value={row.confidence}
-                                    placeholder="confidence"
-                                    onChange={(event) =>
-                                      setSpecDrafts((current) => ({
-                                        ...current,
-                                        [activeProduct.id]: (current[activeProduct.id] || []).map((item, itemIndex) =>
-                                          itemIndex === index ? { ...item, confidence: event.target.value } : item
-                                        ),
-                                      }))
-                                    }
-                                  />
-                                  <select
-                                    className="input sm:col-span-2"
-                                    value={row.status}
-                                    onChange={(event) =>
-                                      setSpecDrafts((current) => ({
-                                        ...current,
-                                        [activeProduct.id]: (current[activeProduct.id] || []).map((item, itemIndex) =>
-                                          itemIndex === index
-                                            ? { ...item, status: event.target.value as SpecDraftRow["status"] }
-                                            : item
-                                        ),
-                                      }))
-                                    }
-                                  >
-                                    <option value="">Unreviewed</option>
-                                    <option value="needs_review">Needs review</option>
-                                    <option value="approved">Approved</option>
-                                  </select>
+                        {isEditingSpecs && (
+                          <details
+                            className="rounded-2xl bg-slate-50 p-4"
+                            open={sourceSummary.shouldShowAdvanced}
+                          >
+                            <summary className="cursor-pointer text-sm font-black">
+                              Advanced spec metadata
+                              {sourceSummary.lowConfidenceCount > 0
+                                ? ` · ${sourceSummary.lowConfidenceCount} low confidence`
+                                : ""}
+                              {sourceSummary.hasMixedSources ? " · mixed sources" : ""}
+                            </summary>
+                            <div className="mt-3 space-y-3">
+                              {rows.map((row, index) => (
+                                <div
+                                  key={`${row.key}-metadata-${index}`}
+                                  className="rounded-2xl bg-white p-3"
+                                >
+                                  <p className="mb-2 text-sm font-black">
+                                    {row.label || row.key || `Spec ${index + 1}`}
+                                  </p>
+                                  <div className="grid gap-2 sm:grid-cols-2">
+                                    <input
+                                      className="input text-xs"
+                                      value={row.key}
+                                      placeholder="key"
+                                      onChange={(event) =>
+                                        setSpecDrafts((current) => ({
+                                          ...current,
+                                          [activeProduct.id]: (current[activeProduct.id] || []).map((item, itemIndex) =>
+                                            itemIndex === index ? { ...item, key: event.target.value } : item
+                                          ),
+                                        }))
+                                      }
+                                    />
+                                    <input
+                                      className="input text-xs"
+                                      value={row.source_type}
+                                      placeholder="source type"
+                                      onChange={(event) =>
+                                        setSpecDrafts((current) => ({
+                                          ...current,
+                                          [activeProduct.id]: (current[activeProduct.id] || []).map((item, itemIndex) =>
+                                            itemIndex === index ? { ...item, source_type: event.target.value } : item
+                                          ),
+                                        }))
+                                      }
+                                    />
+                                    <input
+                                      className="input text-xs"
+                                      value={row.source_url}
+                                      placeholder="source URL"
+                                      onChange={(event) =>
+                                        setSpecDrafts((current) => ({
+                                          ...current,
+                                          [activeProduct.id]: (current[activeProduct.id] || []).map((item, itemIndex) =>
+                                            itemIndex === index ? { ...item, source_url: event.target.value } : item
+                                          ),
+                                        }))
+                                      }
+                                    />
+                                    <input
+                                      className="input text-xs"
+                                      value={row.confidence}
+                                      placeholder="confidence"
+                                      onChange={(event) =>
+                                        setSpecDrafts((current) => ({
+                                          ...current,
+                                          [activeProduct.id]: (current[activeProduct.id] || []).map((item, itemIndex) =>
+                                            itemIndex === index ? { ...item, confidence: event.target.value } : item
+                                          ),
+                                        }))
+                                      }
+                                    />
+                                    <select
+                                      className="input sm:col-span-2 text-xs"
+                                      value={row.status}
+                                      onChange={(event) =>
+                                        setSpecDrafts((current) => ({
+                                          ...current,
+                                          [activeProduct.id]: (current[activeProduct.id] || []).map((item, itemIndex) =>
+                                            itemIndex === index
+                                              ? { ...item, status: event.target.value as SpecDraftRow["status"] }
+                                              : item
+                                          ),
+                                        }))
+                                      }
+                                    >
+                                      <option value="">Unreviewed</option>
+                                      <option value="needs_review">Needs review</option>
+                                      <option value="approved">Approved</option>
+                                    </select>
+                                  </div>
                                 </div>
-                              </div>
-                            ))}
-                          </div>
-                        </details>
+                              ))}
+                            </div>
+                          </details>
+                        )}
                       </>
                     );
                   })()}
@@ -1997,6 +2548,44 @@ export default function AdminProductsPage() {
                   </div>
                 </div>
               )}
+              {/* Danger Zone */}
+              <div className="mt-8 border-t border-red-100 pt-6">
+                <h3 className="text-lg font-black text-red-600">Danger zone</h3>
+                <p className="text-xs font-bold text-muted mt-1">
+                  Actions below can hide the product from search or permanently remove it from the system.
+                </p>
+                
+                <div className="mt-4 flex flex-wrap gap-3">
+                  {activeProduct.product_verification_status === "rejected" ? (
+                    <button
+                      type="button"
+                      className="btn py-2 px-4 text-xs font-bold bg-slate-900 text-white hover:bg-slate-800"
+                      onClick={() => updateProductStatus(activeProduct, "needs_review")}
+                      disabled={working}
+                    >
+                      Restore / Un-archive product
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn py-2 px-4 text-xs font-bold bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100"
+                      onClick={() => updateProductStatus(activeProduct, "rejected")}
+                      disabled={working}
+                    >
+                      Archive / Hide product
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    className="btn py-2 px-4 text-xs font-bold bg-red-50 text-red-700 border border-red-200 hover:bg-red-100"
+                    onClick={() => startProductDelete(activeProduct)}
+                    disabled={working}
+                  >
+                    Permanently delete product
+                  </button>
+                </div>
+              </div>
             </section>
           )}
         </aside>
@@ -2089,6 +2678,121 @@ export default function AdminProductsPage() {
                   Cancel
                 </button>
               </div>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {productToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 py-8">
+          <section className="w-full max-w-xl rounded-2xl bg-white p-6 shadow-xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-sm font-black uppercase text-red-600">
+                  Permanently delete product
+                </p>
+                <h2 className="mt-1 text-2xl font-black">
+                  {productToDelete.name}
+                </h2>
+                <p className="mt-2 text-sm font-medium text-slate-500">
+                  Warning: Deleting this product is permanent and cannot be undone. Linked records may be affected.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="text-sm font-bold underline text-slate-400 hover:text-slate-600"
+                onClick={() => setProductToDelete(null)}
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mt-6 space-y-4">
+              {deleteValidation.loading ? (
+                <div className="rounded-2xl bg-slate-50 p-4 text-center">
+                  <p className="text-sm font-bold text-slate-600">
+                    Checking database for linked records...
+                  </p>
+                </div>
+              ) : deleteValidation.hasLinked ? (
+                <div className="space-y-3">
+                  <div className="rounded-2xl bg-red-50 p-4 border border-red-200">
+                    <p className="text-sm font-bold text-red-800">
+                      Permanent deletion is BLOCKED.
+                    </p>
+                    <p className="text-xs text-red-700 mt-1">
+                      This product is linked to the following records in the database:
+                    </p>
+                    <ul className="list-disc pl-5 mt-2 text-xs font-semibold text-red-800 space-y-1">
+                      {deleteValidation.reasons.map((r) => (
+                        <li key={r}>{r}</li>
+                      ))}
+                    </ul>
+                  </div>
+                  <p className="text-sm font-semibold text-slate-700">
+                    To preserve data integrity and prevent orphan records, you must <strong>Archive / Hide</strong> this product instead of deleting it.
+                  </p>
+                  <div className="flex gap-3">
+                    <button
+                      type="button"
+                      className="btn bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 font-bold"
+                      onClick={() => {
+                        updateProductStatus(productToDelete, "rejected");
+                        setProductToDelete(null);
+                      }}
+                      disabled={working}
+                    >
+                      Archive / Hide product
+                    </button>
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => setProductToDelete(null)}
+                      disabled={working}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="rounded-2xl bg-emerald-50 p-4 border border-emerald-200 text-xs font-semibold text-emerald-800">
+                    No linked records found. Safe to permanently delete.
+                  </div>
+                  
+                  <div>
+                    <label className="label text-slate-700 font-semibold">
+                      To confirm, type the exact product name: <span className="font-bold text-slate-900 select-all">"{productToDelete.name}"</span>
+                    </label>
+                    <input
+                      className="input mt-2 border-red-200 focus:border-red-500 focus:ring-red-500"
+                      value={deleteConfirmationName}
+                      onChange={(e) => setDeleteConfirmationName(e.target.value)}
+                      placeholder="Type name here..."
+                      disabled={working}
+                    />
+                  </div>
+
+                  <div className="flex flex-wrap gap-3 pt-2">
+                    <button
+                      type="button"
+                      className="btn py-2 px-4 bg-red-600 text-white hover:bg-red-700 font-bold disabled:opacity-50 disabled:cursor-not-allowed"
+                      onClick={confirmProductDelete}
+                      disabled={working || deleteConfirmationName !== productToDelete.name}
+                    >
+                      {working ? "Deleting..." : "Permanently delete"}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => setProductToDelete(null)}
+                      disabled={working}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </section>
         </div>

@@ -493,7 +493,7 @@ export function ClaimProductModal({
         className={triggerClassName}
         onClick={() => setOpen(true)}
       >
-        {triggerLabel || (existingClaim ? "Manage ownership" : "I own this product")}
+        {triggerLabel || (existingClaim ? (scorecardCompleted ? "Update owner rating" : "Add owner rating") : "Become first verified owner")}
       </button>
 
       {open && (

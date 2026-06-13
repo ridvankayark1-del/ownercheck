@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabaseClient";
+import { PRODUCT_TAXONOMY } from "@/lib/productTaxonomy";
 
 type Product = {
   id: string;
@@ -29,7 +30,9 @@ export default function AddProductPage() {
   const [newName, setNewName] = useState("");
   const [newBrand, setNewBrand] = useState("");
   const [newModel, setNewModel] = useState("");
-  const [newCategory, setNewCategory] = useState("Headphones");
+  const [newMainCategory, setNewMainCategory] = useState("audio");
+  const [newCategory, setNewCategory] = useState("headphones");
+  const [newProductType, setNewProductType] = useState("true-wireless-earbuds");
   const [newImageUrl, setNewImageUrl] = useState("");
   const [sourceUrl, setSourceUrl] = useState("");
   const [creating, setCreating] = useState(false);
@@ -92,10 +95,17 @@ export default function AddProductPage() {
 
     const name = newName.trim() || query.trim();
     const brand = newBrand.trim();
-    const category = newCategory.trim();
     const cleanSourceUrl = sourceUrl.trim();
 
-    if (!name || !brand || !category) {
+    const mainConfig = PRODUCT_TAXONOMY[newMainCategory];
+    const catConfig = mainConfig?.categories[newCategory];
+    const typeConfig = catConfig?.productTypes.find((pt) => pt.slug === newProductType);
+
+    const mainCategoryLabel = mainConfig?.label || "";
+    const categoryLabel = catConfig?.label || "";
+    const productTypeLabel = typeConfig?.label || "";
+
+    if (!name || !brand || !categoryLabel) {
       setErrorMessage("Product name, brand, and category are required.");
       setCreating(false);
       return;
@@ -121,7 +131,9 @@ export default function AddProductPage() {
         name,
         brand,
         model: newModel.trim(),
-        category,
+        main_category: mainCategoryLabel,
+        category: categoryLabel,
+        product_type: productTypeLabel,
         product_url: cleanSourceUrl,
         image_url: newImageUrl.trim(),
         submitForReview,
@@ -307,21 +319,78 @@ export default function AddProductPage() {
             </div>
 
             <div>
+              <label className="label">Department</label>
+              <select
+                className="input mt-2"
+                value={newMainCategory}
+                onChange={(event) => {
+                  const mSlug = event.target.value;
+                  setNewMainCategory(mSlug);
+                  const mainConfig = PRODUCT_TAXONOMY[mSlug];
+                  if (mainConfig) {
+                    const firstCatKey = Object.keys(mainConfig.categories)[0];
+                    if (firstCatKey) {
+                      setNewCategory(firstCatKey);
+                      const catConfig = mainConfig.categories[firstCatKey];
+                      if (catConfig && catConfig.productTypes.length > 0) {
+                        setNewProductType(catConfig.productTypes[0].slug);
+                      } else {
+                        setNewProductType("");
+                      }
+                    }
+                  }
+                }}
+              >
+                {Object.values(PRODUCT_TAXONOMY)
+                  .filter((m) => m.isActive)
+                  .map((main) => (
+                    <option key={main.slug} value={main.slug}>
+                      {main.label}
+                    </option>
+                  ))}
+              </select>
+            </div>
+
+            <div>
               <label className="label">Category</label>
               <select
                 className="input mt-2"
                 value={newCategory}
-                onChange={(event) => setNewCategory(event.target.value)}
+                onChange={(event) => {
+                  const cSlug = event.target.value;
+                  setNewCategory(cSlug);
+                  const mainConfig = PRODUCT_TAXONOMY[newMainCategory];
+                  const catConfig = mainConfig?.categories[cSlug];
+                  if (catConfig && catConfig.productTypes.length > 0) {
+                    setNewProductType(catConfig.productTypes[0].slug);
+                  } else {
+                    setNewProductType("");
+                  }
+                }}
               >
-                <option>Headphones</option>
-                <option>Microphones</option>
-                <option>Camera</option>
-                <option>Laptop</option>
-                <option>Audio Interface</option>
-                <option>Lighting</option>
-                <option>Keyboard</option>
-                <option>Monitor</option>
-                <option>Other</option>
+                {PRODUCT_TAXONOMY[newMainCategory] &&
+                  Object.values(PRODUCT_TAXONOMY[newMainCategory].categories)
+                    .filter((c) => c.isActive)
+                    .map((cat) => (
+                      <option key={cat.slug} value={cat.slug}>
+                        {cat.label}
+                      </option>
+                    ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="label">Product Type</label>
+              <select
+                className="input mt-2"
+                value={newProductType}
+                onChange={(event) => setNewProductType(event.target.value)}
+              >
+                {PRODUCT_TAXONOMY[newMainCategory]?.categories[newCategory]?.productTypes.map((type) => (
+                  <option key={type.slug} value={type.slug}>
+                    {type.label}
+                  </option>
+                ))}
               </select>
             </div>
 
@@ -344,9 +413,7 @@ export default function AddProductPage() {
                 placeholder="https://www.sony.com/... or Amazon/Best Buy product page"
               />
               <p className="mt-2 text-sm text-muted">
-                This helps confirm the product is real. If the page can be
-              Product URL helps us find better specs and images. You can claim
-              ownership after the product is approved or published.
+                Official product or retailer link helps us verify the product details, specs and images.
               </p>
             </div>
           </div>
