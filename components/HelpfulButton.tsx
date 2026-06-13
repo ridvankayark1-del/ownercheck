@@ -39,54 +39,26 @@ export function HelpfulButton({
       return;
     }
 
-    const { error: voteError } = await supabase
-      .from("answer_helpful_votes")
-      .insert({
-        answer_id: answerId,
-        user_id: user.id,
-      });
+    const { data: newHelpfulCount, error: rpcError } = await supabase.rpc(
+      "vote_answer_helpful",
+      {
+        answer_id_input: answerId,
+      }
+    );
 
-    if (voteError) {
+    if (rpcError) {
       setLoading(false);
 
-      if (voteError.message.includes("answer_helpful_votes_answer_id_user_id_key")) {
+      if (rpcError.message.includes("You already marked this helpful")) {
         setMessage("You already marked this helpful.");
         return;
       }
 
-      setMessage(voteError.message);
+      setMessage(rpcError.message || "Could not vote.");
       return;
     }
 
-    const newHelpfulCount = helpfulCount + 1;
-
-    const { error: answerError } = await supabase
-      .from("answers")
-      .update({ helpful_count: newHelpfulCount })
-      .eq("id", answerId);
-
-    if (answerError) {
-      setLoading(false);
-      setMessage(answerError.message);
-      return;
-    }
-
-    if (ownerId) {
-      const { data: ownerProfile } = await supabase
-        .from("profiles")
-        .select("trust_score")
-        .eq("id", ownerId)
-        .single();
-
-      const currentTrust = ownerProfile?.trust_score || 0;
-
-      await supabase
-        .from("profiles")
-        .update({ trust_score: currentTrust + 1 })
-        .eq("id", ownerId);
-    }
-
-    setHelpfulCount(newHelpfulCount);
+    setHelpfulCount(Number(newHelpfulCount));
     setLoading(false);
     setMessage("Marked helpful.");
   }

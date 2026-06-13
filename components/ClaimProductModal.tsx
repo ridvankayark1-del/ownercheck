@@ -243,21 +243,6 @@ export function ClaimProductModal({
     loadClaim();
   }, [open, productId]);
 
-  async function awardUser(userId: string, profile: Profile | null, amount: number, trust: number, reason: string) {
-    await supabase
-      .from("profiles")
-      .update({
-        credit_balance: (profile?.credit_balance || 0) + amount,
-        trust_score: (profile?.trust_score || 0) + trust,
-      })
-      .eq("id", userId);
-
-    await supabase.from("credit_transactions").insert({
-      user_id: userId,
-      amount,
-      reason,
-    });
-  }
 
   async function submitClaim() {
     setMessage("");
@@ -316,13 +301,6 @@ export function ClaimProductModal({
       return;
     }
 
-    await awardUser(
-      user.id,
-      profile || null,
-      20,
-      2,
-      "Claimed a product as owner"
-    );
 
     setExistingClaim(ownedProduct as ExistingClaim);
     setTrustScore((profile?.trust_score || 0) + 2);
@@ -397,13 +375,6 @@ export function ClaimProductModal({
         .eq("id", user.id)
         .single();
 
-      await awardUser(
-        user.id,
-        profile || null,
-        10,
-        1,
-        "Submitted owner verification photo"
-      );
       setTrustScore((profile?.trust_score || trustScore) + 1);
     }
 

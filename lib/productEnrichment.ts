@@ -4,6 +4,16 @@ import {
   ProductIdentityInput,
 } from "@/lib/productNormalization";
 import { guardProductTaxonomy } from "@/lib/productTaxonomy";
+import {
+  buildCategoryDescription,
+  buildCategoryOverview,
+  extractCategorySpecs,
+  inferCategory as inferProfileCategory,
+  normalizeCategory,
+  normalizeBrand as normalizeProfileBrand,
+  getProductLabel,
+} from "@/lib/productCategoryProfiles";
+import { findProductImage, isPlaceholderImage } from "@/lib/productImages";
 
 type ProductRecord = ProductIdentityInput & {
   id: string;
@@ -11,14 +21,39 @@ type ProductRecord = ProductIdentityInput & {
   source_url?: string | null;
   product_url?: string | null;
   description?: string | null;
+  identity_approved_at?: string | null;
+  specs_approved_at?: string | null;
+  image_approved_at?: string | null;
+  specs?: any | null;
 };
 
 type ImageCandidate = {
   url: string;
   source_url: string;
-  source_type: "submitted" | "open_graph" | "json_ld";
+  source_type: "submitted" | "open_graph" | "json_ld" | "brave_search";
   score: number;
 };
+
+type SearchSource = {
+  title: string;
+  url: string;
+  snippet: string;
+  thumbnail?: { src?: string };
+  profile?: { img?: string };
+};
+
+const REVIEW_SOURCE_SIGNALS = [
+  "review",
+  "rtings",
+  "tomsguide",
+  "techradar",
+  "theverge",
+  "pcmag",
+  "trustedreviews",
+  "soundguys",
+  "dpreview",
+  "youtube",
+];
 
 function isSafeFetchUrl(value?: string | null) {
   if (!value) return false;
@@ -52,8 +87,29 @@ function decodeHtml(value: string) {
 function cleanText(value?: string | null) {
   return decodeHtml(value || "")
     .replace(/<[^>]*>/g, " ")
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
     .replace(/\s+/g, " ")
+    .replace(/^[.\-–—:,;\s]+|[.\-–—:,;\s]+$/g, "")
     .trim();
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function cleanProductText(product: any, value: string) {
+  let cleaned = cleanText(value);
+
+  if (product.brand) {
+    const brand = product.brand.trim();
+    cleaned = cleaned.replace(
+      new RegExp(`\\b${escapeRegExp(brand)}\\s+${escapeRegExp(brand)}\\b`, "gi"),
+      brand
+    );
+  }
+
+  return cleaned;
 }
 
 function firstMatch(html: string, pattern: RegExp) {
@@ -236,15 +292,129 @@ function buildFallbackCopy(product: ProductRecord, sourcedDescription?: string) 
   };
 }
 
+// Brave Search Helpers
+async function searchBrave(productLabel: string, apiKey: string): Promise<SearchSource[]> {
+  const searchQuery = `${productLabel} official specs review pros cons`;
+  const searchUrl = new URL("https://api.search.brave.com/res/v1/web/search");
+  searchUrl.searchParams.set("q", searchQuery);
+  searchUrl.searchParams.set("count", "10");
+
+  const braveResponse = await fetch(searchUrl, {
+    headers: {
+      Accept: "application/json",
+      "X-Subscription-Token": apiKey,
+    },
+  });
+
+  if (!braveResponse.ok) {
+    throw new Error(`Brave Search failed with status ${braveResponse.status}`);
+  }
+
+  const braveJson = await braveResponse.json();
+  return (braveJson.web?.results || [])
+    .filter((item: any) => item.title && item.url)
+    .map((item: any) => ({
+      title: cleanText(item.title),
+      url: cleanText(item.url),
+      snippet: cleanText(item.description || ""),
+      thumbnail: item.thumbnail,
+      profile: item.profile,
+    }));
+}
+
+function sourceMatchesReviewSignals(source: SearchSource | { title: string; url: string }) {
+  const haystack = `${source.title} ${source.url}`.toLowerCase();
+  return REVIEW_SOURCE_SIGNALS.some((signal) => haystack.includes(signal));
+}
+
+function uniqueLinks(sources: SearchSource[]) {
+  return sources
+    .filter(
+      (source, index, allSources) =>
+        allSources.findIndex((item) => item.url === source.url) === index
+    )
+    .map((source) => ({
+      title: source.title,
+      url: source.url,
+    }));
+}
+
+function getFallbackSources(product: any, braveSources: SearchSource[]) {
+  return [
+    ...(product.source_url
+      ? [
+          {
+            title: "Submitted product source",
+            url: product.source_url,
+            snippet: "",
+          },
+        ]
+      : []),
+    ...braveSources,
+  ].filter(
+    (source, index, allSources) =>
+      allSources.findIndex((item) => item.url === source.url) === index
+  );
+}
+
+function getSnippetTextForInference(sources: SearchSource[]) {
+  return sources
+    .flatMap((source) => [source.title, source.snippet])
+    .map(cleanText)
+    .filter(Boolean);
+}
+
+function buildStarterQuestions(productName: string, productBrand: string | null, specs: any) {
+  const productLabel = getProductLabel(productName, productBrand);
+  const bestFor = specs.best_for?.[0]?.toLowerCase();
+
+  return [
+    `How has ${productLabel} held up after long-term use?`,
+    bestFor
+      ? `How well does it work for ${bestFor}?`
+      : "What should buyers know before buying this?",
+    "What are the biggest downsides you noticed?",
+    "Is it comfortable and practical for everyday use?",
+    "Would you buy it again at the same price?",
+  ];
+}
+
+function buildEvaluationCriteria(specs: any) {
+  return Array.from(
+    new Set([
+      "Build quality",
+      "Ease of use",
+      "Value for money",
+      ...(specs.main_features || []).slice(0, 3),
+      "Long-term satisfaction",
+    ])
+  ).slice(0, 6);
+}
+
+function buildSearchKeywords(productName: string, productBrand: string | null, productCategory: string | null, specs: any) {
+  return Array.from(
+    new Set(
+      [
+        productName,
+        productBrand || "",
+        productCategory || "",
+        specs.product_type || "",
+        ...(specs.main_features || []),
+        ...(specs.best_for || []),
+        "real owner review",
+        "buyer questions",
+      ].filter(Boolean)
+    )
+  ).slice(0, 12);
+}
+
 export async function enrichProductRecord(
   supabase: SupabaseClient,
   productId: string
 ) {
   const { data: product, error: productError } = await supabase
     .from("products")
-    .select(
-      "id, name, brand, category, image_url, source_url, product_url, description"
-    )
+    .select("*")
     .eq("id", productId)
     .single();
 
@@ -253,6 +423,183 @@ export async function enrichProductRecord(
   }
 
   const record = product as ProductRecord;
+  const braveApiKey = process.env.BRAVE_SEARCH_API_KEY;
+
+  let update: any;
+
+  // Track enrichment status transition
+  await supabase
+    .from("products")
+    .update({ enrichment_status: "running", enrichment_error: null })
+    .eq("id", productId)
+    .neq("enrichment_status", "running");
+
+  if (braveApiKey) {
+    try {
+      const cleanProduct: ProductRecord = {
+        ...record,
+        name: cleanProductText(record, record.name),
+        brand: normalizeProfileBrand(record.brand),
+        category: record.category
+          ? cleanProductText(record, record.category)
+          : null,
+      };
+
+      if (
+        /airpods\s*3|airpods\s*\(?3rd generation\)?/i.test(cleanProduct.name)
+      ) {
+        cleanProduct.name = "Apple AirPods (3rd generation)";
+        cleanProduct.brand = "Apple";
+        cleanProduct.category = "Headphones";
+      }
+
+      const productLabel = getProductLabel(cleanProduct.name, cleanProduct.brand);
+      const braveSources = await searchBrave(productLabel, braveApiKey);
+      const snippets = braveSources
+        .map((source) => source.snippet)
+        .filter((snippet) => snippet.length > 20);
+      const inferenceSnippets = getSnippetTextForInference(braveSources);
+      const correctedCategory = inferProfileCategory({
+        name: cleanProduct.name,
+        brand: cleanProduct.brand,
+        sourceUrl: cleanProduct.source_url,
+        existingCategory: cleanProduct.category,
+        snippets: inferenceSnippets,
+      });
+      const enrichedProduct = {
+        ...cleanProduct,
+        category: correctedCategory,
+      };
+      const specs = extractCategorySpecs({
+        category: correctedCategory,
+        name: enrichedProduct.name,
+        brand: enrichedProduct.brand,
+        sourceUrl: enrichedProduct.source_url,
+        snippets,
+      });
+      const taxonomy = guardProductTaxonomy({
+        title: enrichedProduct.name,
+        brand: enrichedProduct.brand,
+        category: correctedCategory,
+        productType: specs.product_type,
+      });
+      specs.category = normalizeCategory(taxonomy.category);
+      specs.product_type = taxonomy.productType;
+      const productType = specs.product_type;
+      const categoryConfidence =
+        correctedCategory && correctedCategory !== "Other"
+          ? Math.max(0.25, taxonomy.confidence)
+          : 0.25;
+      const specsConfidence = snippets.length >= 2 && taxonomy.confidence >= 0.55 ? 0.6 : 0.25;
+      const fallbackSources = getFallbackSources(cleanProduct, braveSources);
+      const externalSummarySources = uniqueLinks(fallbackSources);
+      const externalReviewLinks = uniqueLinks(
+        braveSources.filter(sourceMatchesReviewSignals)
+      );
+      const description = cleanProductText(
+        enrichedProduct,
+        buildCategoryDescription({
+          name: enrichedProduct.name,
+          brand: enrichedProduct.brand,
+          category: correctedCategory,
+          productType,
+          specs,
+        })
+      );
+      const aiSummary = cleanProductText(
+        enrichedProduct,
+        buildCategoryOverview({
+          name: enrichedProduct.name,
+          brand: enrichedProduct.brand,
+          category: correctedCategory,
+          productType,
+          specs,
+        })
+      );
+      const imageUrl =
+        !enrichedProduct.image_url || isPlaceholderImage(enrichedProduct.image_url)
+          ? await findProductImage({
+              sourceUrl: enrichedProduct.source_url,
+              braveResults: braveSources,
+              category: correctedCategory,
+            })
+          : enrichedProduct.image_url;
+      const safeIdentityApply =
+        !record.identity_approved_at && categoryConfidence >= 0.75;
+      const safeSpecsApply =
+        !record.specs_approved_at && specsConfidence >= 0.55;
+      const safeImageApply =
+        !record.image_approved_at &&
+        imageUrl &&
+        !isPlaceholderImage(imageUrl);
+      const nextSpecs = safeSpecsApply ? specs : record.specs || specs;
+      const warnings = Array.from(
+        new Set([
+          ...taxonomy.warnings,
+          ...(safeSpecsApply ? [] : ["Specs saved as suggestions pending review."]),
+        ])
+      );
+
+      update = {
+        brand: safeIdentityApply ? enrichedProduct.brand : record.brand,
+        category: safeIdentityApply ? taxonomy.category : record.category,
+        image_url: safeImageApply ? imageUrl : record.image_url,
+        description,
+        ai_summary: aiSummary,
+        specs: nextSpecs,
+        suggested_title: enrichedProduct.name,
+        suggested_brand: enrichedProduct.brand,
+        suggested_category: taxonomy.category,
+        suggested_product_type: productType,
+        suggested_short_summary: aiSummary,
+        suggested_specs: specs,
+        suggested_image_url: imageUrl,
+        enrichment_warnings: warnings,
+        enrichment_sources: externalSummarySources,
+        external_summary:
+          "External source snippets were used to extract the product details and source links below.",
+        common_praise: [],
+        common_complaints: [],
+        starter_questions: buildStarterQuestions(enrichedProduct.name, enrichedProduct.brand || null, specs),
+        evaluation_criteria: buildEvaluationCriteria(specs),
+        search_keywords: buildSearchKeywords(enrichedProduct.name, enrichedProduct.brand || null, enrichedProduct.category || null, specs),
+        external_summary_sources: externalSummarySources,
+        external_review_links: externalReviewLinks,
+        external_summary_updated_at: new Date().toISOString(),
+        enrichment_status: "snippet_enriched",
+        category_confidence: categoryConfidence,
+        specs_confidence: specsConfidence,
+        enrichment_confidence: Math.max(categoryConfidence, specsConfidence),
+      };
+    } catch (error) {
+      // If Brave enrichment fails, fall back to basic page crawler extraction
+      console.error("Brave enrichment failed, falling back to page crawler:", error);
+      update = await runPageCrawlerFallback(record);
+      update.enrichment_error = error instanceof Error ? error.message : "Brave enrichment failed.";
+    }
+  } else {
+    update = await runPageCrawlerFallback(record);
+  }
+
+  const { error: rpcError } = await supabase.rpc("apply_product_enrichment", {
+    product_id: productId,
+    product_patch: update,
+  });
+
+  const { error: updateError } =
+    rpcError && /function .*apply_product_enrichment/i.test(rpcError.message)
+      ? await supabase.from("products").update(update).eq("id", productId)
+      : { error: rpcError };
+
+  if (updateError) {
+    throw updateError;
+  }
+
+  return update;
+}
+
+// Fallback HTML page scraper logic
+async function runPageCrawlerFallback(record: ProductRecord) {
   const sourceUrl = record.source_url || record.product_url || null;
   const identity = buildProductIdentity(record);
   const submittedImage = record.image_url
@@ -265,16 +612,8 @@ export async function enrichProductRecord(
         },
       ]
     : [];
-  let metadata:
-    | Awaited<ReturnType<typeof extractSourceMetadata>>
-    | null = null;
+  let metadata: Awaited<ReturnType<typeof extractSourceMetadata>> | null = null;
   let enrichmentError: string | null = null;
-
-  await supabase
-    .from("products")
-    .update({ enrichment_status: "running", enrichment_error: null })
-    .eq("id", productId)
-    .neq("enrichment_status", "running");
 
   if (isSafeFetchUrl(sourceUrl)) {
     try {
@@ -295,6 +634,7 @@ export async function enrichProductRecord(
     brand = "Apple";
     normalizedCategory = "Headphones";
   }
+
   const copy = buildFallbackCopy(
     { ...record, brand, model, category: normalizedCategory },
     metadata?.description || record.description || undefined
@@ -324,7 +664,7 @@ export async function enrichProductRecord(
     check_before_buying: copy.concerns,
   };
 
-  const update = {
+  return {
     name: canonicalTitle,
     brand,
     category: taxonomy.category,
@@ -381,20 +721,4 @@ export async function enrichProductRecord(
       : "Basic product info is being verified.",
     external_summary_updated_at: new Date().toISOString(),
   };
-
-  const { error: rpcError } = await supabase.rpc("apply_product_enrichment", {
-    product_id: productId,
-    product_patch: update,
-  });
-
-  const { error: updateError } =
-    rpcError && /function .*apply_product_enrichment/i.test(rpcError.message)
-      ? await supabase.from("products").update(update).eq("id", productId)
-      : { error: rpcError };
-
-  if (updateError) {
-    throw updateError;
-  }
-
-  return update;
 }

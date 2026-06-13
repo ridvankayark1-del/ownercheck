@@ -1033,6 +1033,115 @@ $$;
 
 grant execute on function public.answer_public_question(uuid, text) to authenticated;
 
+create or replace function public.vote_answer_helpful(
+  answer_id_input uuid
+)
+returns integer
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  voter_id_value uuid := auth.uid();
+  answer_record public.answers;
+  new_count integer;
+begin
+  if voter_id_value is null then
+    raise exception 'Log in to vote.';
+  end if;
+
+  select *
+  into answer_record
+  from public.answers
+  where id = answer_id_input;
+
+  if not found then
+    raise exception 'Answer not found.';
+  end if;
+
+  if answer_record.owner_id = voter_id_value then
+    raise exception 'You cannot mark your own answer helpful.';
+  end if;
+
+  insert into public.answer_helpful_votes (answer_id, user_id)
+  values (answer_id_input, voter_id_value);
+
+  update public.answers
+  set helpful_count = helpful_count + 1
+  where id = answer_id_input
+  returning helpful_count into new_count;
+
+  if answer_record.owner_id is not null then
+    perform set_config('ownercheck.secure_credit_flow', 'on', true);
+
+    update public.profiles
+    set trust_score = trust_score + 1
+    where id = answer_record.owner_id;
+  end if;
+
+  return new_count;
+exception
+  when unique_violation then
+    raise exception 'You already marked this helpful.';
+end;
+$$;
+
+grant execute on function public.vote_answer_helpful(uuid) to authenticated;
+
+create or replace function public.handle_owned_product_rewards()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  perform set_config('ownercheck.secure_credit_flow', 'on', true);
+
+  if TG_OP = 'INSERT' then
+    if new.verification_status = 'unverified' then
+      update public.profiles
+      set
+        credit_balance = credit_balance + 20,
+        trust_score = trust_score + 2
+      where id = new.user_id;
+
+      insert into public.credit_transactions (user_id, amount, reason)
+      values (new.user_id, 20, 'Claimed a product as owner');
+    elsif new.verification_status = 'photo_submitted' then
+      update public.profiles
+      set
+        credit_balance = credit_balance + 30,
+        trust_score = trust_score + 3
+      where id = new.user_id;
+
+      insert into public.credit_transactions (user_id, amount, reason)
+      values (new.user_id, 30, 'Claimed product with verification photo');
+    end if;
+  elsif TG_OP = 'UPDATE' then
+    if (old.verification_status = 'unverified' or old.verification_status = 'verification_rejected')
+      and new.verification_status = 'photo_submitted'
+    then
+      update public.profiles
+      set
+        credit_balance = credit_balance + 10,
+        trust_score = trust_score + 1
+      where id = new.user_id;
+
+      insert into public.credit_transactions (user_id, amount, reason)
+      values (new.user_id, 10, 'Submitted owner verification photo');
+    end if;
+  end if;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists handle_owned_product_rewards on public.owned_products;
+create trigger handle_owned_product_rewards
+after insert or update on public.owned_products
+for each row execute function public.handle_owned_product_rewards();
+
+
 drop function if exists public.create_direct_question(uuid, text);
 
 create or replace function public.create_direct_question(
@@ -1675,3 +1784,7 @@ end;
 $$;
 
 grant execute on function public.submit_owner_phone_verification(uuid, text, text) to anon, authenticated;
+
+-- Enable Realtime for chat messages
+alter publication supabase_realtime add table public.chat_messages;
+

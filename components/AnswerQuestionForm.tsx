@@ -35,58 +35,25 @@ export function AnswerQuestionForm({ questionId }: AnswerQuestionFormProps) {
       return;
     }
 
-    const { data: answer, error } = await supabase
-      .from("answers")
-      .insert({
-        question_id: questionId,
-        owner_id: user.id,
-        answer_text: text,
-        helpful_count: 0,
-      })
-      .select("id")
-      .single();
+    const { data: answer, error } = await supabase.rpc(
+      "answer_public_question",
+      {
+        question_id_input: questionId,
+        answer_text_input: text,
+      }
+    );
 
     if (error || !answer) {
-  setLoading(false);
+      setLoading(false);
 
-  if (error?.message.includes("unique_user_answer_per_question")) {
-    setMessage("You already answered this question.");
-    return;
-  }
+      if (error?.message.includes("You already answered this question")) {
+        setMessage("You already answered this question.");
+        return;
+      }
 
-  setMessage(error?.message || "Could not add answer.");
-  return;
-}
-
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("credit_balance, trust_score")
-      .eq("id", user.id)
-      .single();
-
-    const currentCredits = profile?.credit_balance || 0;
-    const currentTrust = profile?.trust_score || 0;
-
-    await supabase
-      .from("profiles")
-      .update({
-        credit_balance: currentCredits + 10,
-        trust_score: currentTrust + 1,
-      })
-      .eq("id", user.id);
-
-    await supabase.from("credit_transactions").insert({
-      user_id: user.id,
-      amount: 10,
-      reason: "Answered a product question",
-      related_question_id: questionId,
-      related_answer_id: answer.id,
-    });
-
-await supabase
-  .from("questions")
-  .update({ status: "answered" })
-  .eq("id", questionId);
+      setMessage(error?.message || "Could not add answer.");
+      return;
+    }
 
     setLoading(false);
     setAnswerText("");

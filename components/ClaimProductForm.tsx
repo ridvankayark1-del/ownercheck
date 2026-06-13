@@ -157,33 +157,6 @@ export function ClaimProductForm({ productId, category }: ClaimProductFormProps)
       );
     }
 
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("credit_balance, trust_score")
-      .eq("id", user.id)
-      .single();
-
-    const currentCredits = profile?.credit_balance || 0;
-    const currentTrust = profile?.trust_score || 0;
-
-    const creditReward = verificationPhotoUrl ? 30 : 20;
-    const trustReward = verificationPhotoUrl ? 3 : 2;
-
-    await supabase
-      .from("profiles")
-      .update({
-        credit_balance: currentCredits + creditReward,
-        trust_score: currentTrust + trustReward,
-      })
-      .eq("id", user.id);
-
-    await supabase.from("credit_transactions").insert({
-      user_id: user.id,
-      amount: creditReward,
-      reason: verificationPhotoUrl
-        ? "Claimed product with verification photo"
-        : "Claimed a product as owner",
-    });
 
     setReviewText("");
     setPros("");

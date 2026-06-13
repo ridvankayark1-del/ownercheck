@@ -100,8 +100,10 @@ export default function ChatPage({ params }: PageProps) {
     return session.access_token;
   }
 
-  async function loadChat(id: string) {
-    setLoading(true);
+  async function loadChat(id: string, silent = false) {
+    if (!silent) {
+      setLoading(true);
+    }
     setMessage("");
 
     const token = await getSessionToken();
@@ -140,6 +142,30 @@ export default function ChatPage({ params }: PageProps) {
 
     resolveParams();
   }, [params]);
+
+  useEffect(() => {
+    if (!chatId) return;
+
+    const channel = supabase
+      .channel(`chat-messages-${chatId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "chat_messages",
+          filter: `chat_id=eq.${chatId}`,
+        },
+        async () => {
+          await loadChat(chatId, true);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [chatId]);
 
   async function sendMessage() {
     const text = messageText.trim();
